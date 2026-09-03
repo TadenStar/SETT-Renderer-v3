@@ -140,9 +140,10 @@ def project_warnings(info: ProjectInfo) -> list[str]:
             )
         if not scene.cameras:
             warnings.append(f"Scene '{scene.name}' has no camera")
-    if info.missing_libraries:
-        listed = ", ".join(info.missing_libraries[:3])
-        more = "" if len(info.missing_libraries) <= 3 else f" and {len(info.missing_libraries) - 3} more"
+    missing = list(dict.fromkeys(info.missing_libraries))
+    if missing:
+        listed = ", ".join(missing[:3])
+        more = "" if len(missing) <= 3 else f" and {len(missing) - 3} more"
         warnings.append(f"Missing linked libraries: {listed}{more}")
     return warnings
 

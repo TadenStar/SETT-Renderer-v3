@@ -91,14 +91,15 @@ def test_warnings_for_video_output_sequencer_and_missing_libs() -> None:
             SceneInfo(name="Shot", file_format="FFMPEG", use_sequencer=True, sequencer_strips=3, cameras=["Cam"]),
             SceneInfo(name="Empty", frame_start=5, frame_end=1),
         ],
-        missing_libraries=["//lib/a.blend", "//lib/b.blend", "//lib/c.blend", "//lib/d.blend"],
+        missing_libraries=["//lib/a.blend", "//lib/b.blend", "//lib/a.blend", "//lib/c.blend", "//lib/d.blend"],
     )
     text = "\n".join(project_warnings(info))
     assert "FFMPEG" in text
     assert "3 sequencer strips" in text
     assert "empty frame range" in text
     assert "no camera" in text
-    assert "and 1 more" in text
+    assert "and 1 more" in text  # дубликат //lib/a.blend не считается
+    assert text.count("//lib/a.blend") == 1
 
 
 def test_probe_project_reads_output(tmp_path: Path, fake_blender: Path, blend_file: Path, project_fixture: dict, monkeypatch) -> None:

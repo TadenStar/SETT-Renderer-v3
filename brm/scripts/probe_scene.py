@@ -134,10 +134,11 @@ def describe_scene(scene, log):
 
 
 def missing_libraries(log):
+    # Несколько library-блоков могут ссылаться на один файл — показываем путь один раз.
     missing = []
     for lib in bpy.data.libraries:
         try:
-            if not os.path.exists(bpy.path.abspath(lib.filepath)):
+            if not os.path.exists(bpy.path.abspath(lib.filepath)) and lib.filepath not in missing:
                 missing.append(lib.filepath)
         except Exception as exc:
             log.append(f"library {lib.name}: {exc}")

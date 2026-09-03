@@ -21,6 +21,13 @@ python -m venv .venv
 
 Qt в тестах работает в offscreen-режиме, окна не открываются.
 
+Интеграционные тесты с маркером `blender` запускают настоящий `blender.exe`:
+он ищется автоматически (Blender Foundation, Steam) или берётся из переменной
+`BRM_BLENDER`. Без Blender они пропускаются. Только их: `pytest -m blender`.
+
+Сохранённые выводы проб для юнит-тестов лежат в `tests/fixtures/`. Кэш
+capabilities и временные файлы приложения — в `%LOCALAPPDATA%\BRM\`.
+
 ---
 
 Made by Pavel Postnikov
