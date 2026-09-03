@@ -16,6 +16,7 @@ from qt_helpers import FakePlanBuilder, wait_until
 from brm.core import job_runner as job_runner_mod
 from brm.core.capabilities import Capabilities, CapabilitiesError
 from brm.core.frame_range import FrameRangeMode
+from brm.core.preview import describe_unpreviewable
 from brm.core.project_probe import ProjectInfo, ProjectProbeError
 from brm.core.queue import QueueStore
 from brm.core.render_stats import FrameStat, RenderProgress
@@ -814,3 +815,124 @@ def test_onboarding_skipped_when_already_seen(qapp, settings_path: Path) -> None
         main_window_mod.OnboardingDialog = OnboardingDialog
 
     assert calls == []
+
+
+# --- превью последнего кадра -------------------------------------------------------
+
+
+def _write_png(path: Path, width: int = 64, height: int = 36) -> Path:
+    """Настоящий PNG: поддельный рендер пишет заглушки, а Qt нужен читаемый файл."""
+    from PySide6.QtGui import QColor, QPixmap
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pixmap = QPixmap(width, height)
+    pixmap.fill(QColor("#404040"))
+    assert pixmap.save(str(path), "PNG")
+    return path
+
+
+def test_preview_window_reports_size_missing_file_and_exr(qapp, tmp_path: Path) -> None:
+    from brm.ui.preview_window import PreviewWindow
+
+    window = PreviewWindow()
+    frame = _write_png(tmp_path / "0001.png", 80, 45)
+
+    assert window.show_frame(frame, note="last frame on disk")
+    assert window.image.has_image()
+    assert "0001.png" in window.caption.text() and "80×45" in window.caption.text()
+    assert "last frame on disk" in window.caption.text()
+
+    assert not window.show_frame(tmp_path / "gone.png")
+    assert not window.image.has_image() and "gone" in window.caption.text()
+
+    window.show_message(describe_unpreviewable(tmp_path / "0002.exr"), "warning")
+    assert not window.image.has_image() and "OpenEXR" in window.caption.text()
+
+    window.clear()
+    assert window.current_path is None and not window.image.has_image()
+
+
+def test_preview_follows_saved_frames_only_while_open_and_following(
+    qapp, configured_store: SettingsStore, caps_loader, tmp_path: Path
+) -> None:
+    from brm.core.log_parser import KIND_SAVED, LogEvent
+
+    window = MainWindow(configured_store, capabilities_loader=caps_loader)
+    first = _write_png(tmp_path / "frames" / "0001.png")
+    second = _write_png(tmp_path / "frames" / "0002.png")
+    saved = lambda path: LogEvent(kind=KIND_SAVED, raw="", saved_path=str(path))  # noqa: E731
+
+    window._on_render_event(saved(first))  # окно не открыто — просто ничего не делаем
+    assert window._preview_window is None
+
+    window.show_preview()
+    preview = window._preview_window
+    assert preview is not None and not preview.isHidden()
+
+    window._on_render_event(saved(first))
+    assert preview.current_path == first and preview.image.has_image()
+
+    preview.follow_check.setChecked(False)
+    window._on_render_event(saved(second))
+    assert preview.current_path == first  # следование выключено — кадр не меняем
+
+    preview.follow_check.setChecked(True)
+    window._on_render_event(saved(second))
+    assert preview.current_path == second
+
+
+def test_preview_explains_unpreviewable_saved_frame(
+    qapp, configured_store: SettingsStore, caps_loader, tmp_path: Path
+) -> None:
+    from brm.core.log_parser import KIND_SAVED, LogEvent
+
+    window = MainWindow(configured_store, capabilities_loader=caps_loader)
+    window.show_preview()
+    exr = tmp_path / "frames" / "0007.exr"
+    exr.parent.mkdir(parents=True, exist_ok=True)
+    exr.write_bytes(b"not really exr")
+
+    window._on_render_event(LogEvent(kind=KIND_SAVED, raw="", saved_path=str(exr)))
+    preview = window._preview_window
+    assert preview is not None and not preview.image.has_image()
+    assert "OpenEXR" in preview.caption.text()
+
+
+def test_preview_finds_last_frame_on_disk_without_a_render(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path
+) -> None:
+    """Открыли приложение после ночного рендера: кадров в памяти нет, а на диске есть."""
+    from brm.core.render_plan import resolve_output_path
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = make_window(store, caps_loader=caps_loader, project_loader=project_loader)
+    load_project(qapp, window, blend_file)
+
+    job = window.project_panel.current_job()
+    output_path = resolve_output_path(job, window.settings, "Scene")
+    frames_dir = Path(output_path).parent
+    _write_png(frames_dir / "0001.png")
+    last = _write_png(frames_dir / "0012.png")
+
+    window.show_preview()
+    preview = window._preview_window
+    assert preview is not None
+    assert preview.current_path == last and preview.image.has_image()
+    assert "last frame on disk" in preview.caption.text()
+
+
+def test_preview_without_frames_says_so(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path
+) -> None:
+    from brm.ui.preview_window import EMPTY_TEXT
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = make_window(store, caps_loader=caps_loader, project_loader=project_loader)
+    load_project(qapp, window, blend_file)
+
+    window.show_preview()
+    preview = window._preview_window
+    assert preview is not None and not preview.image.has_image()
+    assert preview.caption.text() == EMPTY_TEXT
