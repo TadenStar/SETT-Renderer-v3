@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import re
 
+# Blender 5.x пишет отчёты в формате CLOG: «00:00.891  reports | ERROR Cannot render, no camera».
 RE_ERROR = re.compile(
-    r"(Error:|Traceback \(most recent call last\)|CUDA error|OptiX error|out of memory|"
+    r"(Error:|\| ERROR |Traceback \(most recent call last\)|CUDA error|OptiX error|out of memory|"
     r"Cannot read file|\[BRM\] FAIL)"
 )
 BRM_PREFIX = "[BRM]"
