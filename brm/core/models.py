@@ -6,6 +6,7 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,7 +28,15 @@ class RenderJob(BaseModel):
     frame_range: FrameRange = Field(default_factory=FrameRange)
     output_template: str = DEFAULT_OUTPUT_TEMPLATE
     preset: str | None = None
+    # Движок и устройство: None — как в файле / лучшее доступное из capabilities.
+    engine: str | None = None
+    cycles_device: str | None = None
+    file_format: str = "PNG"
+    threads: int | None = None
     factory_startup: bool = False
+    # Присваивания RNA-свойств для override.py: «scene.cycles.samples» → 128.
+    # Пресеты M4 раскладываются сюда же.
+    overrides: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     @property
