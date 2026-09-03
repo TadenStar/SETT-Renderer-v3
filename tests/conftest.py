@@ -31,6 +31,34 @@ def _isolated_app_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
 
 
+# Железо тестовой машины: фиксированное, чтобы результат не зависел от того,
+# на чём гоняют тесты. 8 ГБ VRAM — целевой ноутбук из спеки.
+TEST_HARDWARE_VRAM_MB = 8151
+TEST_HARDWARE_RAM_MB = 32189
+
+
+@pytest.fixture(autouse=True)
+def _stub_hardware_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MainWindow не должен запускать настоящий nvidia-smi в каждом тесте.
+
+    Без подмены проба стартует на каждом окне: это внешний процесс, разное
+    железо у разных машин и разный результат подстройки пресета. Тесты,
+    которым важно конкретное железо, передают свой ``hardware_detector=``.
+    """
+    from brm.core.hardware import HardwareInfo
+    from brm.ui import main_window as main_window_mod
+
+    def stub(*args, **kwargs) -> HardwareInfo:
+        return HardwareInfo(
+            gpu_name="NVIDIA GeForce RTX 5070 Laptop GPU",
+            vram_mb=TEST_HARDWARE_VRAM_MB,
+            ram_mb=TEST_HARDWARE_RAM_MB,
+            cpu_threads=24,
+        )
+
+    monkeypatch.setattr(main_window_mod, "detect_hardware", stub)
+
+
 @pytest.fixture
 def settings_path(tmp_path: Path) -> Path:
     return tmp_path / "settings.json"
