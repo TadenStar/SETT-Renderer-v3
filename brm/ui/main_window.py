@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,11 +29,20 @@ from brm import __author__, __version__
 from brm.core.blender_locator import validate_blender_path
 from brm.core.capabilities import Capabilities, get_capabilities, support_problem
 from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
+from brm.core.log_parser import KIND_OTHER, KIND_TIME
 from brm.core.render_plan import RenderPlan, build_render_plan
+from brm.core.render_stats import (
+    RenderTracker,
+    diagnose_failure,
+    format_duration,
+    stats_dict,
+    write_stats,
+)
 from brm.core.runner import STATUS_FAILED, STATUS_STOPPED, STATUS_SUCCESS, RenderProcess
 from brm.core.storage import SettingsStore, cache_dir, tmp_dir, with_recent_project
 from brm.ui.banner import WarningBanner
 from brm.ui.log_view import LogView
+from brm.ui.progress_panel import ProgressPanel
 from brm.ui.project_panel import ProjectPanel, blend_paths_from_mime
 from brm.ui.queue_view import QueueView
 from brm.ui.settings_dialog import SettingsDialog
@@ -86,7 +95,13 @@ class MainWindow(QMainWindow):
         self.render_process.line_received.connect(self._on_render_line)
         self.render_process.finished.connect(self._on_render_finished)
         self.current_plan: RenderPlan | None = None
+        self.tracker: RenderTracker | None = None
         self._render_started_at = 0.0
+        self._pause_requested = False
+        self.paused_frames: list[int] | None = None
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._refresh_progress)
 
         self.setWindowTitle(f"BRM — Blender Render Manager {__version__}")
         self.resize(1200, 760)
@@ -148,6 +163,12 @@ class MainWindow(QMainWindow):
         self.render_button.setMinimumWidth(140)
         self.render_button.clicked.connect(self.start_render)
         top_layout.addWidget(self.render_button, 0)
+        self.pause_button = QPushButton("Pause", top)
+        self.pause_button.setMinimumWidth(100)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setToolTip("Pause after the current frame; Resume renders the remaining frames")
+        self.pause_button.clicked.connect(self.pause_or_resume)
+        top_layout.addWidget(self.pause_button, 0)
         self.stop_button = QPushButton("Stop", top)
         self.stop_button.setObjectName("dangerButton")
         self.stop_button.setMinimumWidth(100)
@@ -160,6 +181,7 @@ class MainWindow(QMainWindow):
         self.project_panel = ProjectPanel()
         self.project_panel.file_requested.connect(self.open_project)
         self.settings_form = SettingsForm()
+        self.progress_panel = ProgressPanel()
         self.log_view = LogView()
         self.queue_view = QueueView()
 
@@ -167,8 +189,10 @@ class MainWindow(QMainWindow):
         left.addWidget(self.project_panel)
         left.addWidget(self.settings_form)
         right = QSplitter(Qt.Orientation.Vertical)
+        right.addWidget(self.progress_panel)
         right.addWidget(self.log_view)
         right.addWidget(self.queue_view)
+        right.setSizes([230, 360, 150])
         main_split = QSplitter(Qt.Orientation.Horizontal)
         main_split.addWidget(left)
         main_split.addWidget(right)
@@ -302,6 +326,10 @@ class MainWindow(QMainWindow):
         self._project_task = None
         self._end_task()
         self.project = info
+        self.paused_frames = None  # пауза относилась к прошлому проекту
+        if not self.render_process.is_running():
+            self.pause_button.setText("Pause")
+            self.pause_button.setEnabled(False)
         self.project_panel.set_project(info, project_warnings(info))
         self.settings = with_recent_project(self.settings, task.tag)
         self._store.save(self.settings)
@@ -317,7 +345,7 @@ class MainWindow(QMainWindow):
 
     # --- рендер ------------------------------------------------------------------
 
-    def start_render(self) -> None:
+    def start_render(self, frames_override: list[int] | None = None) -> None:
         if self.render_process.is_running():
             return
         if self.capabilities is None:
@@ -328,45 +356,118 @@ class MainWindow(QMainWindow):
             self.log_view.set_status("Load a project first", "error")
             return
         try:
-            plan = build_render_plan(job, self.capabilities, self.settings, self.project, tmp_dir=tmp_dir())
+            plan = build_render_plan(
+                job, self.capabilities, self.settings, self.project, tmp_dir=tmp_dir(), frames_override=frames_override
+            )
         except ValueError as exc:
             self.log_view.set_status(str(exc), "error")
             return
         self.current_plan = plan
+        self.tracker = RenderTracker(plan.frames)
+        self._pause_requested = False
+        self.paused_frames = None
         self.log_view.clear()
         self.log_view.set_command(plan.command_line)
         self.log_view.append_line(f"[BRM] output: {plan.output_path}")
         self.log_view.append_line(f"[BRM] log file: {plan.log_path}")
         self.log_view.set_status(f"Rendering {len(plan.frames)} frame(s)…", "muted")
+        self.progress_panel.set_running(len(plan.frames))
         self._render_started_at = time.monotonic()
         self.render_button.setEnabled(False)
+        self.pause_button.setText("Pause")
+        self.pause_button.setEnabled(True)
         self.stop_button.setEnabled(True)
+        self._elapsed_timer.start()
         self.render_process.start(plan)
 
     def stop_render(self) -> None:
         if self.render_process.is_running():
+            self._pause_requested = False
             self.log_view.set_status("Stopping…", "warning")
             self.render_process.stop()
 
+    def pause_or_resume(self) -> None:
+        """Пауза после текущего кадра; Resume дорендеривает оставшиеся кадры новым процессом."""
+        if self.render_process.is_running():
+            self._pause_requested = True
+            self.pause_button.setEnabled(False)
+            self.log_view.set_status("Pausing after the current frame…", "warning")
+            self.progress_panel.status_label.setText("Pausing after the current frame…")
+        elif self.paused_frames:
+            self.start_render(frames_override=self.paused_frames)
+
     def _on_render_line(self, line: str) -> None:
         self.log_view.append_line(line)
+        if self.tracker is None:
+            return
+        event = self.tracker.feed(line)
+        if event.kind == KIND_OTHER:
+            return
+        if event.kind == KIND_TIME and self._pause_requested and self.render_process.is_running():
+            # Кадр сохранён и его время известно — самый чистый момент для остановки.
+            self.render_process.stop(force=True)
+        self._refresh_progress()
+
+    def _refresh_progress(self) -> None:
+        if self.tracker is None:
+            return
+        self.progress_panel.update_progress(self.tracker.progress, time.monotonic() - self._render_started_at)
 
     def _on_render_finished(self, exit_code: int, status: str) -> None:
+        self._elapsed_timer.stop()
         elapsed = time.monotonic() - self._render_started_at
         plan = self.current_plan
-        frames = len(plan.frames) if plan else 0
-        if status == STATUS_SUCCESS:
-            self.log_view.set_status(f"Finished: {frames} frame(s) in {elapsed:.0f} s", "ok")
+        progress = self.tracker.progress if self.tracker is not None else None
+        done = progress.frames_done_count if progress else 0
+        total = len(plan.frames) if plan else 0
+        remaining = progress.remaining_frames() if progress else []
+        paused = status == STATUS_STOPPED and self._pause_requested and bool(remaining)
+        hint = None
+        if paused:
+            self.paused_frames = remaining
+            text, role = f"Paused after {done} / {total} frame(s), {len(remaining)} left. Press Resume to continue", "warning"
+        elif status == STATUS_SUCCESS or (status == STATUS_STOPPED and self._pause_requested and not remaining):
+            # Пауза пришла, когда кадры уже кончились: это обычное завершение.
+            text, role = f"Finished: {done} / {total} frame(s) in {format_duration(elapsed)}", "ok"
         elif status == STATUS_STOPPED:
-            self.log_view.set_status(f"Stopped by user after {elapsed:.0f} s", "warning")
+            text, role = f"Stopped by user after {done} / {total} frame(s), {format_duration(elapsed)}", "warning"
         elif status == STATUS_FAILED:
-            self.log_view.set_status(f"Blender exited with code {exit_code} after {elapsed:.0f} s. See the log", "error")
+            text, role = f"Failed after {done} / {total} frame(s): exit code {exit_code}, {format_duration(elapsed)}", "error"
+            hint = diagnose_failure(progress.errors if progress else [], exit_code, status)
         else:
-            self.log_view.set_status("Blender crashed or could not start. See the log", "error")
+            text, role = "Blender crashed or could not start. See the log", "error"
+            hint = diagnose_failure(progress.errors if progress else [], exit_code, status)
+        self.log_view.set_status(text, role)
+        self._refresh_progress()
+        self.progress_panel.set_finished(text, role, hint)
         if plan is not None:
             self.log_view.append_line(f"[BRM] finished: status={status} exit_code={exit_code} log={plan.log_path}")
+            if progress is not None:
+                self._write_render_stats(plan, progress, status, exit_code, elapsed)
+        self._pause_requested = False
+        self.pause_button.setEnabled(bool(paused and self.paused_frames))
+        self.pause_button.setText("Resume" if paused and self.paused_frames else "Pause")
         self.stop_button.setEnabled(False)
         self.refresh_blender_status()
+
+    def _write_render_stats(self, plan: RenderPlan, progress, status: str, exit_code: int, elapsed: float) -> None:
+        # Данные для графика времени кадров и истории (раздел 4.9 спеки).
+        data = stats_dict(
+            progress,
+            status=status,
+            exit_code=exit_code,
+            duration_s=elapsed,
+            extra={
+                "blend_path": plan.job.blend_path,
+                "scene": plan.scene.name if plan.scene else plan.job.scene,
+                "log_file": plan.log_path.name,
+                "output_path": plan.output_path,
+            },
+        )
+        try:
+            write_stats(plan.stats_path, data)
+        except OSError as exc:
+            self.log_view.append_line(f"[BRM] SKIP stats file: {exc}")
 
     # --- фоновые задачи ------------------------------------------------------
 

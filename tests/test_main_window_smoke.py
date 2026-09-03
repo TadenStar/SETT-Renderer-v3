@@ -6,19 +6,27 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from qt_helpers import wait_until
 
 from brm.core.capabilities import Capabilities, CapabilitiesError
+from brm.core.command_builder import command_line
 from brm.core.frame_range import FrameRangeMode
 from brm.core.project_probe import ProjectInfo, ProjectProbeError
+from brm.core.render_plan import RenderPlan
+from brm.core.render_stats import FrameStat, RenderProgress
 from brm.core.storage import AppSettings, SettingsStore
 from brm.ui import main_window as main_window_mod
 from brm.ui.log_view import LogView
 from brm.ui.main_window import MainWindow
+from brm.ui.progress_panel import ProgressPanel
 from brm.ui.settings_dialog import SettingsDialog
+from brm.ui.sparkline import Sparkline
 
 CAPS_FIXTURE = "capabilities_blender_5.0.1.json"
 PROJECT_FIXTURE = "project_default_scene_5.0.1.json"
@@ -248,6 +256,102 @@ def test_start_render_reports_unstartable_blender(
     assert window.current_plan.log_path.is_file()
     assert "status=crashed" in window.current_plan.log_path.read_text(encoding="utf-8")
     assert window.current_plan.override_script.is_file()
+
+
+def test_progress_panel_states(qapp) -> None:
+    panel = ProgressPanel()
+    assert panel.status_label.text() == "Waiting to start"
+    panel.set_running(10)
+    assert panel.frames_bar.maximum() == 10 and "10 frame" in panel.status_label.text()
+
+    progress = RenderProgress(frames_expected=list(range(1, 11)), frames_done=[1, 2], current_frame=3, sample=4, samples_total=16, mem_mb=360, peak_mb=512, engine="Cycles")
+    progress.frame_stats = [FrameStat(frame=1, render_time_s=0.7, wall_time_s=2.0), FrameStat(frame=2, render_time_s=0.6, wall_time_s=2.0)]
+    panel.update_progress(progress, elapsed_s=65)
+    assert panel.frames_bar.value() == 2 and panel.samples_bar.value() == 4 and panel.samples_bar.maximum() == 16
+    assert panel.status_label.text() == "Frame 2 / 10 · rendering 3 · sample 4 / 16"
+    details = panel.detail_label.text()
+    assert "Elapsed 1m 05s" in details and "ETA 16 s" in details and "Last frame 0.6 s" in details
+    assert "Mem 360 M" in details and "Peak 512 M" in details and "Cycles" in details
+    assert panel.sparkline.values() == [(1, 0.7), (2, 0.6)]
+
+    panel.set_finished("Failed", "error", hint="Out of memory")
+    assert not panel.hint_label.isHidden() and panel.hint_label.text() == "Out of memory"
+    panel.set_idle()
+    assert panel.hint_label.isHidden() and panel.frames_bar.value() == 0 and panel.sparkline.values() == []
+
+
+def test_sparkline_paints_and_shows_tooltip(qapp) -> None:
+    widget = Sparkline()
+    widget.resize(200, 60)
+    widget.set_values([(1, 0.5), (2, 1.5), (3, 1.0)])
+    assert not widget.grab().isNull()  # отрисовка без исключений
+    event = QMouseEvent(
+        QEvent.Type.MouseMove, QPointF(2, 30), QPointF(2, 30), Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier
+    )
+    widget.mouseMoveEvent(event)
+    assert widget.toolTip() == "Frame 1: 0.50 s"
+
+
+def _fake_render_script(frames: list[int], delay: float) -> str:
+    """Скрипт для python -c: печатает строки в формате Blender 5.0 по кадру за раз."""
+    return (
+        "import sys, time\n"
+        f"frames = {frames!r}\n"
+        "print('Rendering animation (frames %d..%d)' % (frames[0], frames[-1]), flush=True)\n"
+        "for f in frames:\n"
+        "    print('00:00.100  render           | Rendering frame %d' % f, flush=True)\n"
+        "    print('00:00.100  render           | Fra: %d | Mem: 10M | Sample 8/16' % f, flush=True)\n"
+        f"    time.sleep({delay})\n"
+        "    print(\"00:00.200  render           | Saved: 'D:/out/%04d.png'\" % f, flush=True)\n"
+        "    print('00:00.200  render           | Time: 00:00.10 (Saving: 00:00.00)', flush=True)\n"
+        "print('Blender quit', flush=True)\n"
+    )
+
+
+def test_pause_after_frame_and_resume(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    built: list[list[int] | None] = []
+
+    def fake_builder(job, caps, settings, project, *, tmp_dir, frames_override=None):
+        built.append(frames_override)
+        frames = frames_override or [1, 2, 3]
+        argv = [sys.executable, "-c", _fake_render_script(frames, 0.4)]
+        out = tmp_path / "out"
+        return RenderPlan(job=job, argv=argv, command_line=command_line(argv), override_script=tmp_path / "o.py", override_settings={}, output_path=str(out / "####"), output_dir=out, frames=frames, engine="CYCLES", cycles_device=None, log_path=out / f"render_log_{len(built)}.txt", scene=project.default_scene())
+
+    monkeypatch.setattr(main_window_mod, "build_render_plan", fake_builder)
+    window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
+    window.render_process._kill_delay_ms = 200
+    wait_until(qapp, lambda: window.capabilities is not None)
+    window.open_project(str(blend_file))
+    wait_until(qapp, lambda: window.project is not None)
+
+    window.start_render()
+    assert window.pause_button.isEnabled() and window.pause_button.text() == "Pause"
+    wait_until(qapp, lambda: window.tracker is not None and window.tracker.progress.frames_done_count >= 1, timeout=20)
+    window.pause_or_resume()
+    assert not window.pause_button.isEnabled()
+    wait_until(qapp, lambda: window.render_process.status is not None, timeout=30)
+
+    assert window.paused_frames in ([2, 3], [3])
+    assert window.pause_button.text() == "Resume" and window.pause_button.isEnabled()
+    assert "Paused after" in window.progress_panel.status_label.text()
+    assert window.render_button.isEnabled()
+    assert window.current_plan.stats_path.is_file()
+
+    remaining = list(window.paused_frames)
+    window.pause_or_resume()  # Resume
+    assert built[-1] == remaining
+    wait_until(qapp, lambda: window.render_process.status == "success", timeout=30)
+    assert window.tracker.progress.frames_done == remaining
+    assert "Finished" in window.progress_panel.status_label.text()
+    assert window.pause_button.text() == "Pause" and not window.pause_button.isEnabled()
+    assert window.progress_panel.sparkline.values() == [(f, 0.1) for f in remaining]
+    stats = json.loads(window.current_plan.stats_path.read_text(encoding="utf-8"))
+    assert stats["frames_done"] == remaining and stats["status"] == "success"
 
 
 def test_author_credit_is_shown(qapp, settings_path: Path) -> None:

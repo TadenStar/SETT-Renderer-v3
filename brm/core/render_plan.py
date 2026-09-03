@@ -35,6 +35,11 @@ class RenderPlan:
     log_path: Path
     scene: SceneInfo | None = field(default=None, repr=False)
 
+    @property
+    def stats_path(self) -> Path:
+        """JSON со временем кадров рядом с логом: render_stats_<timestamp>.json."""
+        return self.log_path.with_name(self.log_path.name.replace("render_log_", "render_stats_")).with_suffix(".json")
+
 
 def log_file_name(now: datetime | None = None) -> str:
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
@@ -48,12 +53,21 @@ def build_render_plan(
     project: ProjectInfo,
     *,
     tmp_dir: str | os.PathLike[str],
+    frames_override: list[int] | None = None,
 ) -> RenderPlan:
-    """Собирает всё для запуска. Бросает ValueError, если задача противоречива."""
+    """Собирает всё для запуска. Бросает ValueError, если задача противоречива.
+
+    ``frames_override`` — явный список кадров (докрутка после паузы или resume в M5).
+    """
     scene = project.scene(job.scene) or project.default_scene()
     if scene is None:
         raise ValueError("The project has no scenes")
-    frames = resolve_frames(job.frame_range, scene_start=scene.frame_start, scene_end=scene.frame_end)
+    if frames_override is not None:
+        if not frames_override:
+            raise ValueError("No frames left to render")
+        frames = sorted(set(frames_override))
+    else:
+        frames = resolve_frames(job.frame_range, scene_start=scene.frame_start, scene_end=scene.frame_end)
 
     output_base = settings.default_output_dir or str(Path(job.blend_path).parent)
     output_path = expand_output_template(
