@@ -25,3 +25,6 @@ tmp/
 .idea/
 Thumbs.db
 desktop.ini
+
+# pytest
+.pytest_cache/
