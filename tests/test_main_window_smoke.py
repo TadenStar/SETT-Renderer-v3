@@ -586,3 +586,153 @@ def test_video_choice_is_saved_on_close(qapp, settings_path: Path, fake_blender:
     window.close()
     saved = store.load()
     assert saved.last_video_preset == "ProRes 422 HQ" and saved.auto_build_video is True
+
+
+# --- экспертная форма и режимы отображения (M7) -----------------------------------
+
+
+def test_display_modes_switch_which_form_feeds_overrides(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path
+) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out"), last_preset="Balanced"))
+    window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
+    load_project(qapp, window, blend_file)
+    form = window.settings_form
+
+    from brm.ui.settings_form import VIEW_EXPERT, VIEW_PRESET_ONLY, VIEW_SIMPLE
+
+    assert form.display_mode() == VIEW_SIMPLE  # дефолт не меняется — совместимость с M4-M6
+    assert form.expert_form.field_count() > 150  # capabilities дошли до экспертной формы
+
+    # Сцена из фикстуры по умолчанию на EEVEE — path строки "samples" ведёт туда.
+    form.rows["samples"].set_mode(MODE_CUSTOM)
+    form.rows["samples"].set_value(42)
+    assert form.custom_values() == {"eevee.taa_render_samples": 42}
+
+    form.set_display_mode(VIEW_EXPERT)
+    assert form.stack.currentWidget() is form.expert_form
+    assert form.custom_values() == {}  # экспертная форма ещё ничего не трогала
+
+    form.expert_form.rows["eevee.taa_render_samples"].set_mode(MODE_CUSTOM)
+    form.expert_form.rows["eevee.taa_render_samples"].set_value(16)
+    assert form.custom_values() == {"eevee.taa_render_samples": 16}
+    assert form.untouched_paths() == set()
+
+    form.set_display_mode(VIEW_PRESET_ONLY)
+    assert isinstance(form.stack.currentWidget(), type(form.stack.widget(0)))
+    assert form.custom_values() == {} and form.untouched_paths() == set()
+
+    # Simple-режим со своими значениями по-прежнему доступен после переключений.
+    form.set_display_mode(VIEW_SIMPLE)
+    assert form.custom_values() == {"eevee.taa_render_samples": 42}
+
+
+def test_expert_mode_overrides_reach_the_composed_job(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path
+) -> None:
+    from brm.ui.settings_form import VIEW_EXPERT
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out"), last_preset="Balanced"))
+    window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
+    load_project(qapp, window, blend_file)
+
+    window.settings_form.set_display_mode(VIEW_EXPERT)
+    row = window.settings_form.expert_form.rows["view_settings.view_transform"]
+    row.set_mode(MODE_CUSTOM)
+    row.set_value("Standard")
+
+    job = window.compose_job()
+    assert job.overrides["view_settings.view_transform"] == "Standard"
+    assert "cycles.samples" not in job.overrides  # simple-строки не в игре в Expert-режиме
+
+
+# --- история (M7) --------------------------------------------------------------------
+
+
+def test_history_is_recorded_after_a_finished_render(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from brm.core.history import HistoryStore
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    history_store = HistoryStore(tmp_path / "history.db")
+    builder = FakePlanBuilder(tmp_path, base_frames=[1, 2], delay=0.02)
+    window = make_window(
+        store, caps_loader=caps_loader, project_loader=project_loader, fake_builder=builder, monkeypatch=monkeypatch
+    )
+    window.history_store = history_store
+    load_project(qapp, window, blend_file)
+    window.project_panel.resume_check.setChecked(False)
+
+    window.start_render()
+    wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
+
+    entries = history_store.list_entries()
+    assert len(entries) == 1
+    assert entries[0].status == "success" and entries[0].frames_done == 2 and entries[0].preset == "Balanced"
+    assert entries[0].scene == "Scene"
+
+
+def test_history_dialog_shows_entries_and_chart(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from brm.core.history import HistoryStore
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    history_store = HistoryStore(tmp_path / "history.db")
+    builder = FakePlanBuilder(tmp_path, base_frames=[1, 2, 3], delay=0.02)
+    window = make_window(
+        store, caps_loader=caps_loader, project_loader=project_loader, fake_builder=builder, monkeypatch=monkeypatch
+    )
+    window.history_store = history_store
+    load_project(qapp, window, blend_file)
+    window.project_panel.resume_check.setChecked(False)
+    window.start_render()
+    wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
+
+    window.show_history()
+    assert window._history_dialog is not None
+    view = window._history_dialog.view
+    assert view.table.rowCount() == 1
+    assert view.count_label.text() == "1 render(s)"
+
+    view.table.selectRow(0)
+    entry = view.selected_entry()
+    assert entry is not None and entry.frames_done == 3
+    # fake_render_script печатает фиксированный "Time: 00:00.10" независимо от delay.
+    assert view.sparkline.values() == [(f, 0.1) for f in (1, 2, 3)]
+    assert "Scene" in view.chart_label.text()
+
+    # Диалог уже открыт — новая запись в истории должна дойти до таблицы без повторного show_history().
+    window.project_panel.mode_combo.setCurrentIndex(2)  # Single frame
+    window.start_render()
+    wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
+    assert view.table.rowCount() == 2
+
+
+def test_history_recording_never_crashes_the_finish_handler(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    builder = FakePlanBuilder(tmp_path, base_frames=[1], delay=0.02)
+    window = make_window(
+        store, caps_loader=caps_loader, project_loader=project_loader, fake_builder=builder, monkeypatch=monkeypatch
+    )
+
+    class ExplodingHistoryStore:
+        def record_from_stats_file(self, _path):
+            raise RuntimeError("disk on fire")
+
+    window.history_store = ExplodingHistoryStore()
+    load_project(qapp, window, blend_file)
+    window.project_panel.resume_check.setChecked(False)
+    window.start_render()
+    wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
+
+    assert "Finished" in window.log_view.status_label.text()
+    assert any("SKIP history: disk on fire" in line for line in window.log_view.lines())

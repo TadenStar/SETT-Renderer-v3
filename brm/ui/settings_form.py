@@ -1,9 +1,13 @@
-"""Панель «Render Settings» (раздел 4.3 спеки): пресет и главные параметры.
+"""Панель «Render Settings» (раздел 4.3 спеки): пресет и три режима отображения.
+
+- **Preset** — доверяем пресету целиком, полей не показываем.
+- **Simple** — 6–8 главных параметров (исходная форма M4).
+- **Expert** — вся форма из capabilities с поиском (``ui/expert_form.py``, M7).
 
 У каждого параметра три состояния: «Preset» (значение из пресета, только
 показ), «Custom» (своё значение), «Don't touch» (не трогать то, что в файле).
 Только отображение: резолв пресета делает core.preset_resolver, панель
-показывает результат и отдаёт свои значения.
+показывает результат и отдаёт свои значения — из активного режима отображения.
 """
 from __future__ import annotations
 
@@ -20,19 +24,26 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from brm.core.capabilities import Capabilities
 from brm.core.preset_resolver import FILE_FORMAT_PATH, ResolvedPreset
 from brm.core.presets import Preset
+from brm.ui.expert_form import ExpertForm
+from brm.ui.field_modes import MODE_CUSTOM, MODE_PRESET, MODE_SKIP
 from brm.ui.theme import set_role
 
-MODE_PRESET = "preset"
-MODE_CUSTOM = "custom"
-MODE_SKIP = "skip"
 _MODES = [("Preset", MODE_PRESET), ("Custom", MODE_CUSTOM), ("Don't touch", MODE_SKIP)]
 DEFAULT_FORMATS = ["PNG", "JPEG", "OPEN_EXR", "OPEN_EXR_MULTILAYER", "TIFF", "BMP"]
+
+VIEW_PRESET_ONLY = "preset_only"
+VIEW_SIMPLE = "simple"
+VIEW_EXPERT = "expert"
+_VIEWS = [("Preset", VIEW_PRESET_ONLY), ("Simple", VIEW_SIMPLE), ("Expert", VIEW_EXPERT)]
+_VIEW_INDEX = {value: index for index, (_title, value) in enumerate(_VIEWS)}
 
 
 @dataclass(frozen=True)
@@ -214,31 +225,61 @@ class SettingsForm(QGroupBox):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Render Settings", parent)
         self._presets: list[Preset] = []
+        self._caps: Capabilities | None = None
+        self._engine: str | None = None
+
         self.preset_combo = QComboBox(self)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_index)
         self.description_label = QLabel("", self)
         self.description_label.setWordWrap(True)
         set_role(self.description_label, "muted")
+
+        self.view_combo = QComboBox(self)
+        for title, value in _VIEWS:
+            self.view_combo.addItem(title, value)
+        self.view_combo.setCurrentIndex(_VIEW_INDEX[VIEW_SIMPLE])
+        self.view_combo.currentIndexChanged.connect(self._on_view_changed)
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("Mode:", self))
+        view_row.addWidget(self.view_combo)
+        view_row.addStretch(1)
+
         self.skipped_label = QLabel("", self)
         self.skipped_label.setWordWrap(True)
         set_role(self.skipped_label, "warning")
         self.skipped_label.hide()
 
+        preset_only_page = QLabel(
+            "Every setting comes from the preset above. Switch to Simple or Expert to change values.", self
+        )
+        preset_only_page.setWordWrap(True)
+        set_role(preset_only_page, "muted")
+
+        simple_page = QWidget(self)
         self.rows: dict[str, ParamRow] = {}
-        form = QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
+        simple_form = QFormLayout(simple_page)
+        simple_form.setContentsMargins(0, 0, 0, 0)
         for spec in PARAMS:
-            row = ParamRow(spec, self)
+            row = ParamRow(spec, simple_page)
             row.changed.connect(self.values_changed)
             self.rows[spec.key] = row
-            form.addRow(f"{spec.label}:", row)
+            simple_form.addRow(f"{spec.label}:", row)
+
+        self.expert_form = ExpertForm(self)
+        self.expert_form.values_changed.connect(self.values_changed)
+
+        self.stack = QStackedWidget(self)
+        self.stack.addWidget(preset_only_page)
+        self.stack.addWidget(simple_page)
+        self.stack.addWidget(self.expert_form)
+        self.stack.setCurrentIndex(_VIEW_INDEX[VIEW_SIMPLE])
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.preset_combo)
         layout.addWidget(self.description_label)
-        layout.addLayout(form)
+        layout.addLayout(view_row)
+        layout.addWidget(self.stack, 1)
         layout.addWidget(self.skipped_label)
-        layout.addStretch(1)
 
     # --- публичное API ---------------------------------------------------------
 
@@ -256,9 +297,23 @@ class SettingsForm(QGroupBox):
     def current_preset_name(self) -> str | None:
         return self.preset_combo.currentData()
 
+    def display_mode(self) -> str:
+        return self.view_combo.currentData()
+
+    def set_display_mode(self, mode: str) -> None:
+        index = self.view_combo.findData(mode)
+        if index >= 0:
+            self.view_combo.setCurrentIndex(index)
+
+    def set_capabilities(self, caps: Capabilities | None) -> None:
+        self._caps = caps
+        self.expert_form.set_capabilities(caps)
+
     def set_engine(self, engine: str | None) -> None:
+        self._engine = engine
         for row in self.rows.values():
             row.set_engine(engine)
+        self.expert_form.set_engine(engine)
 
     def set_format_choices(self, choices: list[str]) -> None:
         self.rows["format"].set_choices(choices)
@@ -268,6 +323,7 @@ class SettingsForm(QGroupBox):
         for row in self.rows.values():
             path = row.path()
             row.show_preset_value(resolved.value(path) if (resolved and path) else None)
+        self.expert_form.show_resolved(resolved)
         if resolved is None or not resolved.skipped:
             self.skipped_label.hide()
             return
@@ -277,14 +333,19 @@ class SettingsForm(QGroupBox):
         self.skipped_label.show()
 
     def custom_values(self) -> dict[str, Any]:
-        values: dict[str, Any] = {}
-        for row in self.rows.values():
-            path = row.path()
-            if path and row.mode() == MODE_CUSTOM:
-                values[path] = row.value()
-        return values
+        mode = self.display_mode()
+        if mode == VIEW_EXPERT:
+            return self.expert_form.custom_values()
+        if mode == VIEW_PRESET_ONLY:
+            return {}
+        return {row.path(): row.value() for row in self.rows.values() if row.path() and row.mode() == MODE_CUSTOM}
 
     def untouched_paths(self) -> set[str]:
+        mode = self.display_mode()
+        if mode == VIEW_EXPERT:
+            return self.expert_form.untouched_paths()
+        if mode == VIEW_PRESET_ONLY:
+            return set()
         return {row.path() for row in self.rows.values() if row.path() and row.mode() == MODE_SKIP}  # type: ignore[misc]
 
     # --- слоты -------------------------------------------------------------------
@@ -294,6 +355,10 @@ class SettingsForm(QGroupBox):
         name = self.current_preset_name()
         if name:
             self.preset_changed.emit(name)
+
+    def _on_view_changed(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+        self.values_changed.emit()  # смена режима меняет действующие overrides
 
     def _show_description(self) -> None:
         name = self.current_preset_name()

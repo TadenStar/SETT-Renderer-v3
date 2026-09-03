@@ -148,6 +148,9 @@ def main():
         "eevee": getattr(scene, "eevee", None),
         "view_layer": view_layer,
         "preferences": bpy.context.preferences,
+        # Отдельный корень, а не только scene.view_settings через "scene.": экспертная
+        # форма (M7) и раздел 6 настроек (Color Management) обращаются к нему напрямую.
+        "view_settings": getattr(scene, "view_settings", None),
     }
     if layer_name:
         restrict_view_layers(scene, layer_name, log)

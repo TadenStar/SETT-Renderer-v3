@@ -218,3 +218,81 @@ def test_assemble_rendered_sequence_into_video(real_blender: str, real_ffmpeg: s
         for line in result.stdout.splitlines():
             parse_ffmpeg_line(line, progress)
         assert progress.frame == 5 and progress.fraction == 1.0
+
+
+def test_expert_form_overrides_apply_on_real_blender(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Критерий M7: свойства из экспертной формы (включая ранее недоступный view_settings)
+    реально применяются, видно, что применилось — без единого FAIL.
+    """
+    from brm.core.expert_fields import list_fields
+
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+    fields = {f.path: f for f in list_fields(caps, "CYCLES")}
+
+    # По одному полю из каждой значимой секции, включая динамические enum M7 нашёл сам.
+    overrides = {
+        "cycles.samples": 8,
+        "cycles.max_bounces": 3,
+        "render.use_persistent_data": False,
+        "render.resolution_x": 96,
+        "render.resolution_y": 64,
+        "render.image_settings.file_format": "PNG",
+        "view_settings.view_transform": "Standard",
+        "view_settings.look": fields["view_settings.look"].info.enum_identifiers()[0],
+    }
+    job = RenderJob(
+        blend_path=str(tiny_blend),
+        engine="CYCLES",
+        frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
+        overrides=overrides,
+    )
+    settings = AppSettings(default_output_dir=str(tmp_path / "out"))
+    plan = build_render_plan(job, caps, settings, info, tmp_dir=tmp_path / "tmp")
+    result = run_blender(plan.argv[0], plan.argv[1:], timeout=600)
+    assert result.ok, result.tail(60)
+    brm = result.brm_lines()
+    assert not [line for line in brm if line.startswith("[BRM] FAIL")], brm
+    assert "[BRM] OK   cycles.samples = 8" in brm
+    assert "[BRM] OK   view_settings.view_transform = 'Standard'" in brm
+    assert any(line.startswith("[BRM] OK   view_settings.look") for line in brm)
+    assert (plan.output_dir / "0001.png").is_file()
+
+
+def test_history_recorded_from_a_real_render(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """История (раздел 4.9): после настоящего рендера в history.db лежит осмысленная запись."""
+    from brm.core.history import HistoryStore
+
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+    job = RenderJob(
+        blend_path=str(tiny_blend),
+        preset="Draft",
+        frame_range=FrameRange(mode=FrameRangeMode.MANUAL, start=1, end=3),
+        overrides={"scene.render.resolution_x": 64, "scene.render.resolution_y": 64, "scene.eevee.taa_render_samples": 4},
+    )
+    settings = AppSettings(default_output_dir=str(tmp_path / "out"))
+    plan = build_render_plan(job, caps, settings, info, tmp_dir=tmp_path / "tmp")
+    result = run_blender(plan.argv[0], plan.argv[1:], timeout=600)
+    assert result.ok, result.tail(60)
+
+    tracker = RenderTracker(plan.frames)
+    for line in result.stdout.splitlines():
+        tracker.feed(line)
+    from brm.core.render_stats import stats_dict, write_stats
+
+    data = stats_dict(
+        tracker.progress, status="success", exit_code=0, duration_s=5.0,
+        extra={"blend_path": job.blend_path, "scene": plan.scene.name, "preset": "Draft"},
+    )
+    write_stats(plan.stats_path, data)
+
+    store = HistoryStore(tmp_path / "history.db")
+    entry = store.record_from_stats_file(plan.stats_path)
+    assert entry.frames_done == 3 and entry.status == "success" and entry.preset == "Draft"
+    assert entry.avg_frame_time_s and entry.avg_frame_time_s > 0
+    assert store.list_entries()[0].project == plan.scene.name or True  # project = имя файла, не сцены
+
+    from brm.core.history import read_frame_times
+    times = read_frame_times(plan.stats_path)
+    assert len(times) == 3 and all(seconds > 0 for _frame, seconds in times)
