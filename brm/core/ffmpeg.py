@@ -17,12 +17,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from brm.core.app_paths import package_root
 from brm.core.output_scan import parse_output_template
 from brm.core.storage import app_data_dir
 
 log = logging.getLogger(__name__)
 
-BUILTIN_VIDEO_PRESETS_DIR = Path(__file__).resolve().parent.parent / "resources" / "video"
+BUILTIN_VIDEO_PRESETS_DIR = package_root() / "brm" / "resources" / "video"
 FFMPEG_EXE_NAME = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
 # ffmpeg пишет прогресс в stderr: «frame=  123 fps= 45 q=28.0 size=...».
 RE_FFMPEG_FRAME = re.compile(r"\bframe=\s*(\d+)")

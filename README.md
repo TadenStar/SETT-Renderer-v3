@@ -42,6 +42,17 @@ winget install Gyan.FFmpeg
 Сохранённые выводы проб для юнит-тестов лежат в `tests/fixtures/`. Кэш
 capabilities и временные файлы приложения — в `%LOCALAPPDATA%\BRM\`.
 
+## Сборка exe
+
+```powershell
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\pyinstaller --noconfirm brm.spec
+```
+
+Результат — один файл `dist\BRM.exe`, ffmpeg с ним не идёт (см. выше), Blender
+тоже находится отдельно при первом запуске. При первом старте открывается
+окно с приветствием, которое сразу просит путь к `blender.exe`.
+
 ---
 
 Made by Pavel Postnikov
