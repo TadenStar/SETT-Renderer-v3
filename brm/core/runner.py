@@ -75,11 +75,18 @@ class RenderProcess(QObject):
         self._open_log(plan)
         self._proc.start()
 
-    def stop(self) -> None:
-        """Стоп: terminate, через kill_delay_ms — kill, если Blender не вышел."""
+    def stop(self, *, force: bool = False) -> None:
+        """Стоп: terminate, через kill_delay_ms — kill, если Blender не вышел.
+
+        ``force`` убивает сразу: после «Saved:» кадр на диске и терять нечего,
+        а Blender в фоне на terminate всё равно не реагирует.
+        """
         if not self.is_running():
             return
         self._stop_requested = True
+        if force:
+            self._proc.kill()
+            return
         self._proc.terminate()
         QTimer.singleShot(self._kill_delay_ms, self._kill_if_running)
 

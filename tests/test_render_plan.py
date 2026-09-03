@@ -90,6 +90,16 @@ def test_plan_invalid_frame_list_raises(caps: Capabilities, project: ProjectInfo
         build_render_plan(job, caps, AppSettings(), project, tmp_dir=tmp_path)
 
 
+def test_frames_override_replaces_range(caps: Capabilities, project: ProjectInfo, tmp_path: Path) -> None:
+    job = RenderJob(blend_path=project.file_path)
+    plan = build_render_plan(job, caps, AppSettings(), project, tmp_dir=tmp_path, frames_override=[7, 3, 3, 4])
+    assert plan.frames == [3, 4, 7]
+    assert plan.argv[plan.argv.index("--render-frame") + 1] == "3,4,7"
+    assert plan.stats_path.name.startswith("render_stats_") and plan.stats_path.suffix == ".json"
+    with pytest.raises(ValueError, match="No frames left"):
+        build_render_plan(job, caps, AppSettings(), project, tmp_dir=tmp_path, frames_override=[])
+
+
 def test_log_file_name_has_timestamp() -> None:
     from datetime import datetime
 
