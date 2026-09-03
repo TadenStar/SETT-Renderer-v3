@@ -70,6 +70,54 @@ def test_resolve_owner_walks_paths() -> None:
     assert tpl.resolve_owner(roots, "samples") == (None, "samples")
 
 
+class OnlyOpenExr:
+    """Как image_settings в 5.0: старое имя формата отвергается, новое принимается."""
+
+    def __init__(self) -> None:
+        self._format = "PNG"
+
+    @property
+    def file_format(self):
+        return self._format
+
+    @file_format.setter
+    def file_format(self, value):
+        if value not in ("PNG", "OPEN_EXR", "JPEG"):
+            raise TypeError(f'enum "{value}" not found in (\'PNG\', \'OPEN_EXR\', \'JPEG\')')
+        self._format = value
+
+
+def test_safe_set_prefer_falls_back_to_next_candidate() -> None:
+    owner = OnlyOpenExr()
+    log: list[str] = []
+    assert tpl.safe_set_prefer(owner, "file_format", ["OPEN_EXR_MULTILAYER", "OPEN_EXR"], log, label="render.image_settings.file_format")
+    assert owner.file_format == "OPEN_EXR"
+    assert log == ["OK   render.image_settings.file_format = 'OPEN_EXR' (fallback, 'OPEN_EXR_MULTILAYER' rejected)"]
+
+    log.clear()
+    assert tpl.safe_set_prefer(owner, "file_format", ["PNG", "JPEG"], log)
+    assert log == ["OK   file_format = 'PNG'"]
+
+    log.clear()
+    assert not tpl.safe_set_prefer(owner, "file_format", ["A", "B"], log)
+    assert log[0].startswith("FAIL file_format: none of ['A', 'B'] accepted")
+    assert not tpl.safe_set_prefer(owner, "nope", ["A"], log) and log[-1].startswith("SKIP nope")
+    assert not tpl.safe_set_prefer(None, "x", ["A"], log) and log[-1] == "SKIP x: owner is None"
+
+
+def test_apply_assignments_handles_prefer_dicts() -> None:
+    scene = Holder()
+    scene.render = Holder()
+    scene.render.image_settings = OnlyOpenExr()
+    log: list[str] = []
+    applied = tpl.apply_assignments(
+        {"scene": scene, "render": scene.render},
+        [["render.image_settings.file_format", {"prefer": ["OPEN_EXR_MULTILAYER", "OPEN_EXR"]}]],
+        log,
+    )
+    assert applied == 1 and scene.render.image_settings.file_format == "OPEN_EXR"
+
+
 def test_apply_assignments_and_summary() -> None:
     scene = Holder()
     scene.cycles = Holder()

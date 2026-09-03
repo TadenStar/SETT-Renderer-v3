@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "name": "Draft",
+  "order": 10,
+  "description": "Check animation, motion and timing in minutes, not quality. 50% resolution, JPEG, 20 s per frame limit.",
+  "engine": null,
+  "output": {
+    "file_format": "JPEG",
+    "color_mode": "RGB",
+    "quality": 90,
+    "resolution_percentage": 50
+  },
+  "common": {
+    "render.use_persistent_data": true,
+    "render.use_simplify": true,
+    "render.simplify_subdivision_render": 2,
+    "render.use_motion_blur": false
+  },
+  "cycles": {
+    "cycles.use_adaptive_sampling": true,
+    "cycles.adaptive_threshold": 0.05,
+    "cycles.samples": 128,
+    "cycles.adaptive_min_samples": 0,
+    "cycles.time_limit": 20,
+    "cycles.use_denoising": false,
+    "cycles.max_bounces": 4,
+    "cycles.diffuse_bounces": 1,
+    "cycles.glossy_bounces": 2,
+    "cycles.transmission_bounces": 2,
+    "cycles.volume_bounces": 0,
+    "cycles.transparent_max_bounces": 4,
+    "cycles.sample_clamp_direct": 0,
+    "cycles.sample_clamp_indirect": 5,
+    "cycles.blur_glossy": 2.0,
+    "cycles.caustics_reflective": false,
+    "cycles.caustics_refractive": false,
+    "cycles.use_light_tree": true,
+    "cycles.auto_scrambling_distance": true,
+    "cycles.volume_step_rate": 4.0,
+    "cycles.volume_max_steps": 256,
+    "cycles.volume_preview_step_rate": 8.0,
+    "cycles.texture_limit_render": "1024",
+    "cycles.use_auto_tile": true,
+    "cycles.tile_size": 2048
+  },
+  "eevee": {
+    "eevee.taa_render_samples": 16,
+    "eevee.use_shadows": true,
+    "eevee.shadow_ray_count": 1,
+    "eevee.shadow_step_count": 2,
+    "eevee.use_raytracing": false,
+    "eevee.use_volumetric_shadows": false,
+    "eevee.volumetric_tile_size": "8",
+    "eevee.volumetric_samples": 32,
+    "eevee.use_overscan": true,
+    "eevee.overscan_size": 3.0
+  },
+  "view_layer": {}
+}

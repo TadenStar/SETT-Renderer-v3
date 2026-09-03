@@ -43,6 +43,8 @@ class AppSettings(BaseModel):
     theme: Literal["system", "light", "dark"] = "dark"
     # Последние открытые .blend, новые в начале.
     recent_projects: list[str] = Field(default_factory=list)
+    # Последний выбранный пресет рендера.
+    last_preset: str = "Balanced"
 
 
 def with_recent_project(

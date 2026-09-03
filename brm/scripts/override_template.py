@@ -33,6 +33,29 @@ def safe_set(obj, attr, value, log, label=None):
     return True
 
 
+def safe_set_prefer(obj, attr, candidates, log, label=None):
+    """Присваивает первый принятый вариант из списка: enum различаются между версиями."""
+    name = label or attr
+    if obj is None:
+        log.append(f"{SKIP} {name}: owner is None")
+        return False
+    if not hasattr(obj, attr):
+        log.append(f"{SKIP} {name}: not available in this Blender build")
+        return False
+    last_error = ""
+    for index, candidate in enumerate(candidates):
+        try:
+            setattr(obj, attr, candidate)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        note = "" if index == 0 else f" (fallback, {candidates[0]!r} rejected)"
+        log.append(f"{OK}   {name} = {candidate!r}{note}")
+        return True
+    log.append(f"{FAIL} {name}: none of {list(candidates)!r} accepted: {last_error}")
+    return False
+
+
 def resolve_owner(roots, path):
     """``'scene.cycles.samples'`` → (roots['scene'].cycles, 'samples'). None, если цепочка оборвалась."""
     parts = path.split(".")
@@ -51,7 +74,11 @@ def apply_assignments(roots, assignments, log):
     applied = 0
     for path, value in assignments:
         owner, attr = resolve_owner(roots, path)
-        if safe_set(owner, attr, value, log, label=path):
+        if isinstance(value, dict) and "prefer" in value:
+            ok = safe_set_prefer(owner, attr, list(value["prefer"]), log, label=path)
+        else:
+            ok = safe_set(owner, attr, value, log, label=path)
+        if ok:
             applied += 1
     return applied
 
@@ -110,15 +137,20 @@ def main():
     log = []
     scene = pick_scene(settings.get("scene"))
     log.append(f"{OK}   scene = {scene.name!r}")
+    layer_name = settings.get("only_view_layer")
+    view_layer = scene.view_layers.get(layer_name) if layer_name else None
+    if view_layer is None and len(scene.view_layers):
+        view_layer = scene.view_layers[0]
     roots = {
         "scene": scene,
         "render": scene.render,
         "cycles": getattr(scene, "cycles", None),
         "eevee": getattr(scene, "eevee", None),
+        "view_layer": view_layer,
         "preferences": bpy.context.preferences,
     }
-    if settings.get("only_view_layer"):
-        restrict_view_layers(scene, settings["only_view_layer"], log)
+    if layer_name:
+        restrict_view_layers(scene, layer_name, log)
     if settings.get("engine"):
         safe_set(scene.render, "engine", settings["engine"], log, "scene.render.engine")
     if settings.get("disable_sequencer", True):
