@@ -26,6 +26,7 @@ from brm.ui.log_view import LogView
 from brm.ui.main_window import MainWindow
 from brm.ui.progress_panel import ProgressPanel
 from brm.ui.settings_dialog import SettingsDialog
+from brm.ui.settings_form import MODE_CUSTOM, MODE_PRESET, MODE_SKIP, SettingsForm
 from brm.ui.sparkline import Sparkline
 
 CAPS_FIXTURE = "capabilities_blender_5.0.1.json"
@@ -352,6 +353,87 @@ def test_pause_after_frame_and_resume(
     assert window.progress_panel.sparkline.values() == [(f, 0.1) for f in remaining]
     stats = json.loads(window.current_plan.stats_path.read_text(encoding="utf-8"))
     assert stats["frames_done"] == remaining and stats["status"] == "success"
+
+
+def test_settings_form_modes_and_values(qapp, fixtures_dir: Path) -> None:
+    from brm.core.preset_resolver import resolve_preset
+    from brm.core.presets import load_presets
+
+    caps = Capabilities.model_validate(json.loads((fixtures_dir / CAPS_FIXTURE).read_text(encoding="utf-8")))
+    presets = load_presets(user_dir=fixtures_dir / "none")
+    form = SettingsForm()
+    chosen: list[str] = []
+    form.preset_changed.connect(chosen.append)
+    form.set_presets(presets, "Balanced")
+    assert form.current_preset_name() == "Balanced" and "overnight" in form.description_label.text()
+    assert chosen == []  # программная установка сигнал не шлёт
+
+    resolved = resolve_preset(presets[2], caps, "CYCLES")
+    form.set_engine("CYCLES")
+    form.show_resolved(resolved)
+    rows = form.rows
+    assert rows["samples"].value() == 1024 and not rows["samples"].widget.isEnabled()
+    assert rows["threshold"].value() == 0.01
+    assert rows["denoise"].value() is True
+    assert rows["format"].value() == "PNG"
+    assert form.custom_values() == {} and form.untouched_paths() == set()
+
+    rows["samples"].set_mode(MODE_CUSTOM)
+    rows["samples"].set_value(64)
+    rows["persistent"].set_mode(MODE_SKIP)
+    assert rows["samples"].widget.isEnabled()
+    assert form.custom_values() == {"cycles.samples": 64}
+    assert form.untouched_paths() == {"render.use_persistent_data"}
+    rows["samples"].set_mode(MODE_PRESET)
+    assert rows["samples"].value() == 1024  # вернулись к значению пресета
+
+    form.set_engine("BLENDER_EEVEE")
+    form.show_resolved(resolve_preset(presets[2], caps, "BLENDER_EEVEE"))
+    assert rows["samples"].value() == 64 and rows["samples"].path() == "eevee.taa_render_samples"
+    assert not rows["threshold"].mode_combo.isEnabled() and rows["threshold"].note.text() == "Cycles only"
+
+    form.preset_combo.setCurrentIndex(0)
+    assert chosen == ["Draft"]
+
+
+def test_render_job_gets_preset_overrides(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out"), last_preset="Draft"))
+    captured: list = []
+
+    def fake_builder(job, caps, settings, project, *, tmp_dir, frames_override=None):
+        captured.append(job)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(main_window_mod, "build_render_plan", fake_builder)
+    window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
+    wait_until(qapp, lambda: window.capabilities is not None)
+    window.open_project(str(blend_file))
+    wait_until(qapp, lambda: window.project is not None)
+
+    assert window.settings_form.current_preset_name() == "Draft"
+    assert window.resolved_preset is not None and window.resolved_preset.engine == "BLENDER_EEVEE"
+    assert window.settings_form.rows["samples"].value() == 16  # Draft для EEVEE
+    window.settings_form.rows["resolution"].set_mode(MODE_CUSTOM)
+    window.settings_form.rows["resolution"].set_value(25)
+    window.settings_form.rows["persistent"].set_mode(MODE_SKIP)
+
+    window.start_render()
+    job = captured[-1]
+    assert job.preset == "Draft" and job.engine is None and job.file_format == "JPEG"
+    assert job.overrides["eevee.taa_render_samples"] == 16
+    assert job.overrides["render.resolution_percentage"] == 25
+    assert "render.use_persistent_data" not in job.overrides
+    assert "cycles.samples" not in job.overrides
+    assert store.load().last_preset == "Draft"
+
+    window.settings_form.preset_combo.setCurrentIndex(3)  # Final
+    assert store.load().last_preset == "Final"
+    window.start_render()
+    assert captured[-1].file_format == "OPEN_EXR_MULTILAYER" and captured[-1].overrides["eevee.taa_render_samples"] == 192
+    assert captured[-1].overrides["render.image_settings.file_format"] == {"prefer": ["OPEN_EXR_MULTILAYER", "OPEN_EXR"]}
 
 
 def test_author_credit_is_shown(qapp, settings_path: Path) -> None:

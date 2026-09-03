@@ -12,8 +12,11 @@ from brm.core.blender_process import run_blender
 from brm.core.capabilities import get_capabilities, run_probe, support_problem
 from brm.core.frame_range import FrameRange, FrameRangeMode
 from brm.core.models import RenderJob
+from brm.core.preset_resolver import compose_overrides, resolve_preset
+from brm.core.presets import load_presets
 from brm.core.project_probe import probe_project, project_warnings
 from brm.core.render_plan import build_render_plan
+from brm.core.render_stats import RenderTracker
 from brm.core.storage import AppSettings
 
 pytestmark = pytest.mark.blender
@@ -101,3 +104,44 @@ def test_render_one_frame_with_override(real_blender: str, tiny_blend: Path, tmp
     png = plan.output_dir / "0001.png"
     assert png.is_file() and png.stat().st_size > 0
     assert "Saved:" in result.stdout
+
+
+def test_presets_draft_and_final_change_the_render(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Критерий M4: пресет меняет сэмплы, формат и время кадра, ничего не падает в FAIL."""
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+    presets = {p.name: p for p in load_presets(user_dir=tmp_path / "none")}
+    small = {"scene.render.resolution_x": 96, "scene.render.resolution_y": 64, "render.resolution_percentage": 100}
+    results = {}
+    for name in ("Draft", "Final"):
+        resolved = resolve_preset(presets[name], caps, "CYCLES")
+        overrides = compose_overrides(resolved, custom=small)
+        job = RenderJob(
+            blend_path=str(tiny_blend),
+            engine="CYCLES",
+            preset=name,
+            file_format=resolved.file_format or "PNG",
+            frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
+            overrides=overrides,
+            output_template="{output_dir}/{preset}/####",
+        )
+        plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path / "out")), info, tmp_dir=tmp_path / "tmp")
+        result = run_blender(plan.argv[0], plan.argv[1:], timeout=900)
+        assert result.ok, result.tail(60)
+        assert not [line for line in result.brm_lines() if line.startswith("[BRM] FAIL")], result.brm_lines()
+        tracker = RenderTracker(plan.frames)
+        for line in result.stdout.splitlines():
+            tracker.feed(line)
+        results[name] = (tracker.progress, plan, result.stdout)
+
+    draft, draft_plan, draft_log = results["Draft"]
+    final, final_plan, final_log = results["Final"]
+    assert draft.samples_total == 128 and final.samples_total == 4096
+    assert draft.frame_times() and final.frame_times()
+    assert (draft_plan.output_dir / "0001.jpg").is_file()
+    assert (final_plan.output_dir / "0001.exr").is_file()
+    assert "[BRM] OK   cycles.time_limit = 20" in draft_log
+    assert "[BRM] OK   view_layer.cycles.denoising_store_passes = True" in final_log
+    assert "[BRM] OK   cycles.sampling_pattern = 'BLUE_NOISE'" in final_log
+    # 5.0: OPEN_EXR_MULTILAYER отвергнут, сработал запасной OPEN_EXR; в 4.x пройдёт первый.
+    assert "[BRM] OK   render.image_settings.file_format = 'OPEN_EXR" in final_log

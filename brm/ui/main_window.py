@@ -30,6 +30,8 @@ from brm.core.blender_locator import validate_blender_path
 from brm.core.capabilities import Capabilities, get_capabilities, support_problem
 from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
 from brm.core.log_parser import KIND_OTHER, KIND_TIME
+from brm.core.preset_resolver import ResolvedPreset, compose_overrides, display_file_format, resolve_preset
+from brm.core.presets import Preset, find_preset, load_presets
 from brm.core.render_plan import RenderPlan, build_render_plan
 from brm.core.render_stats import (
     RenderTracker,
@@ -103,6 +105,9 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._refresh_progress)
 
+        self.presets: list[Preset] = load_presets()
+        self.resolved_preset: ResolvedPreset | None = None
+
         self.setWindowTitle(f"BRM — Blender Render Manager {__version__}")
         self.resize(1200, 760)
         self.setAcceptDrops(True)
@@ -111,6 +116,9 @@ class MainWindow(QMainWindow):
         self._build_central()
         self.project_panel.set_recent(self.settings.recent_projects)
         self.project_panel.set_default_output_dir(self.settings.default_output_dir or "")
+        self.settings_form.set_presets(self.presets, self.settings.last_preset)
+        self.settings_form.preset_changed.connect(self._on_preset_changed)
+        self.project_panel.scene_combo.currentTextChanged.connect(lambda _name: self.refresh_resolved_preset())
         self.refresh_blender_status()
 
     # --- построение ----------------------------------------------------------
@@ -259,7 +267,37 @@ class MainWindow(QMainWindow):
         self._end_task()
         self.capabilities = caps
         self.capabilities_error = None
+        formats = caps.property("image_settings", "file_format")
+        if formats is not None and formats.enum_items:
+            self.settings_form.set_format_choices(formats.enum_identifiers())
         self.refresh_blender_status()
+        self.refresh_resolved_preset()
+
+    # --- пресеты -----------------------------------------------------------------
+
+    def current_preset(self) -> Preset | None:
+        return find_preset(self.presets, self.settings_form.current_preset_name())
+
+    def _on_preset_changed(self, name: str) -> None:
+        if name != self.settings.last_preset:
+            self.settings = self.settings.model_copy(update={"last_preset": name})
+            self._store.save(self.settings)
+        self.refresh_resolved_preset()
+
+    def refresh_resolved_preset(self) -> None:
+        """Пресет + capabilities + движок сцены → значения в форме. Логики нет, только вызов core."""
+        preset = self.current_preset()
+        scene = None
+        if self.project is not None:
+            scene = self.project.scene(self.project_panel.scene_combo.currentText()) or self.project.default_scene()
+        if preset is None or self.capabilities is None or scene is None:
+            self.resolved_preset = None
+            self.settings_form.set_engine(None)
+            self.settings_form.show_resolved(None)
+            return
+        self.resolved_preset = resolve_preset(preset, self.capabilities, scene.engine)
+        self.settings_form.set_engine(self.resolved_preset.engine)
+        self.settings_form.show_resolved(self.resolved_preset)
 
     def _on_capabilities_failed(self, task: FunctionTask, message: str) -> None:
         if task is not self._caps_task:
@@ -331,6 +369,7 @@ class MainWindow(QMainWindow):
             self.pause_button.setText("Pause")
             self.pause_button.setEnabled(False)
         self.project_panel.set_project(info, project_warnings(info))
+        self.refresh_resolved_preset()
         self.settings = with_recent_project(self.settings, task.tag)
         self._store.save(self.settings)
         self.project_panel.set_recent(self.settings.recent_projects)
@@ -355,6 +394,20 @@ class MainWindow(QMainWindow):
         if job is None or self.project is None:
             self.log_view.set_status("Load a project first", "error")
             return
+        self.refresh_resolved_preset()
+        resolved = self.resolved_preset
+        if resolved is not None:
+            overrides = compose_overrides(
+                resolved, self.settings_form.custom_values(), self.settings_form.untouched_paths()
+            )
+            job = job.model_copy(
+                update={
+                    "overrides": overrides,
+                    "preset": resolved.preset.name,
+                    "engine": resolved.engine if resolved.preset.engine else None,
+                    "file_format": display_file_format(overrides, job.file_format),
+                }
+            )
         try:
             plan = build_render_plan(
                 job, self.capabilities, self.settings, self.project, tmp_dir=tmp_dir(), frames_override=frames_override
@@ -370,6 +423,10 @@ class MainWindow(QMainWindow):
         self.log_view.set_command(plan.command_line)
         self.log_view.append_line(f"[BRM] output: {plan.output_path}")
         self.log_view.append_line(f"[BRM] log file: {plan.log_path}")
+        if resolved is not None:
+            self.log_view.append_line(f"[BRM] preset: {resolved.preset.name}, {len(job.overrides)} setting(s)")
+            for skipped in resolved.skipped:
+                self.log_view.append_line(f"[BRM] SKIP preset {skipped.path}: {skipped.reason}")
         self.log_view.set_status(f"Rendering {len(plan.frames)} frame(s)…", "muted")
         self.progress_panel.set_running(len(plan.frames))
         self._render_started_at = time.monotonic()
