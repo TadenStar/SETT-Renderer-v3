@@ -42,7 +42,15 @@ from brm.core.history import HistoryStore, read_frame_times
 from brm.core.job_runner import RUN_FAILED, RUN_PAUSED, RUN_STOPPED, RUN_SUCCESS, JobRunner
 from brm.core.log_parser import KIND_OTHER, KIND_SAVED
 from brm.core.models import RenderJob
-from brm.core.preset_resolver import ResolvedPreset, compose_overrides, display_file_format, resolve_preset
+from brm.core.hardware import HardwareInfo, detect_hardware
+from brm.core.hardware_tuning import TuningResult, tune_preset
+from brm.core.preset_resolver import (
+    ResolvedPreset,
+    compose_overrides,
+    display_file_format,
+    resolve_engine,
+    resolve_preset,
+)
 from brm.core.preview import describe_unpreviewable, is_previewable, latest_rendered_frame
 from brm.core.presets import Preset, find_preset, load_presets
 from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
@@ -74,6 +82,7 @@ PROJECT_TIMEOUT = 600.0
 
 CapabilitiesLoader = Callable[..., Capabilities]
 ProjectLoader = Callable[..., ProjectInfo]
+HardwareDetector = Callable[..., HardwareInfo]
 
 
 def default_capabilities_loader(blender_path: str, *, cancel: threading.Event) -> Capabilities:
@@ -96,6 +105,7 @@ class MainWindow(QMainWindow):
         project_loader: ProjectLoader | None = None,
         queue_store: QueueStore | None = None,
         history_store: HistoryStore | None = None,
+        hardware_detector: HardwareDetector | None = None,
     ) -> None:
         super().__init__(parent)
         self._store = store
@@ -134,6 +144,11 @@ class MainWindow(QMainWindow):
 
         self.presets: list[Preset] = load_presets()
         self.resolved_preset: ResolvedPreset | None = None
+        # Железо: пока проба не пришла — пустой объект, подстройка ничего не трогает.
+        self._hardware_detector = hardware_detector or detect_hardware
+        self.hardware = HardwareInfo()
+        self._hardware_task: FunctionTask | None = None
+        self.tuning: TuningResult | None = None
         self.video_presets: list[VideoPreset] = load_video_presets()
         self.video_process = VideoProcess(self)
         self.video_process.line_received.connect(self._on_video_line)
@@ -153,12 +168,15 @@ class MainWindow(QMainWindow):
         self.project_panel.set_default_output_dir(self.settings.default_output_dir or "")
         self.settings_form.set_presets(self.presets, self.settings.last_preset)
         self.settings_form.preset_changed.connect(self._on_preset_changed)
+        self.settings_form.set_tuning_enabled(self.settings.tune_for_hardware)
+        self.settings_form.tuning_toggled.connect(self._on_tuning_toggled)
         self.project_panel.scene_combo.currentTextChanged.connect(lambda _name: self.refresh_resolved_preset())
         self.queue_view.set_items(self.queue.items)
         self.video_panel.set_presets(self.video_presets, self.settings.last_video_preset)
         self.video_panel.set_auto_build(self.settings.auto_build_video)
         self.refresh_ffmpeg_status()
         self.refresh_blender_status()
+        self._start_hardware_probe()
 
     # --- построение ----------------------------------------------------------
 
@@ -386,18 +404,67 @@ class MainWindow(QMainWindow):
             self._store.save(self.settings)
         self.refresh_resolved_preset()
 
+    # --- железо ------------------------------------------------------------------
+
+    def _start_hardware_probe(self) -> None:
+        """nvidia-smi занимает заметное время — в поток, чтобы окно не мёрзло."""
+        task = FunctionTask(self._hardware_detector)
+        task.signals.finished.connect(lambda info, t=task: self._on_hardware(t, info))
+        task.signals.failed.connect(lambda message, t=task: self._on_hardware_failed(t, message))
+        self._hardware_task = task
+        task.start()
+
+    def _on_hardware(self, task: FunctionTask, info: HardwareInfo) -> None:
+        if task is not self._hardware_task:
+            return
+        self._hardware_task = None
+        self.hardware = info
+        for note in info.notes:
+            self.log_view.append_line(f"[BRM] hardware: {note}")
+        self.refresh_resolved_preset()
+
+    def _on_hardware_failed(self, task: FunctionTask, message: str) -> None:
+        """Проба железа не критична: без неё подстройка просто выключена."""
+        if task is not self._hardware_task:
+            return
+        self._hardware_task = None
+        self.log_view.append_line(f"[BRM] hardware probe failed: {message}")
+        self.refresh_resolved_preset()
+
+    def _on_tuning_toggled(self, enabled: bool) -> None:
+        self.settings.tune_for_hardware = enabled
+        self._store.save(self.settings)
+        self.refresh_resolved_preset()
+
+    def tuned_preset(self, preset: Preset, scene_engine: str) -> Preset:
+        """Пресет, урезанный под эту машину. Решение целиком в core, здесь только вызов."""
+        self.tuning = None
+        if not self.settings_form.tuning_enabled() or self.capabilities is None:
+            self.settings_form.show_tuning(self.hardware.summary(), None)
+            return preset
+        if not self.hardware.is_known():
+            self.settings_form.show_tuning(self.hardware.summary(), None)
+            return preset
+        engine = resolve_engine(preset, self.capabilities, scene_engine)
+        self.tuning = tune_preset(preset, self.hardware, engine)
+        self.settings_form.show_tuning(self.hardware.summary(), self.tuning.notes)
+        return self.tuning.preset
+
+    # --- пресет --------------------------------------------------------------------
+
     def refresh_resolved_preset(self) -> None:
-        """Пресет + capabilities + движок сцены → значения в форме. Логики нет, только вызов core."""
+        """Пресет + железо + capabilities + движок сцены → значения в форме. Логики нет, только вызов core."""
         preset = self.current_preset()
         scene = None
         if self.project is not None:
             scene = self.project.scene(self.project_panel.scene_combo.currentText()) or self.project.default_scene()
         if preset is None or self.capabilities is None or scene is None:
             self.resolved_preset = None
+            self.tuning = None
             self.settings_form.set_engine(None)
             self.settings_form.show_resolved(None)
             return
-        self.resolved_preset = resolve_preset(preset, self.capabilities, scene.engine)
+        self.resolved_preset = resolve_preset(self.tuned_preset(preset, scene.engine), self.capabilities, scene.engine)
         self.settings_form.set_engine(self.resolved_preset.engine)
         self.settings_form.show_resolved(self.resolved_preset)
 
@@ -510,6 +577,11 @@ class MainWindow(QMainWindow):
             self.log_view.append_line(f"[BRM] output: {plan.output_path}")
             if plan.job.preset:
                 self.log_view.append_line(f"[BRM] preset: {plan.job.preset}, {len(plan.job.overrides)} setting(s)")
+            # Что подстроено под железо — в лог рядом с командой: через месяц
+            # по логу должно быть понятно, почему тайл 1024, а не 2048 из пресета.
+            if self.tuning is not None and self.tuning.changed():
+                self.log_view.append_line(f"[BRM] hardware: {self.hardware.summary()}")
+                self.log_view.append_line(f"[BRM] tuned for this machine: {self.tuning.summary()}")
             resolved = self.resolved_preset
             if resolved is not None and self._active_queue_item is None:
                 for skipped in resolved.skipped:

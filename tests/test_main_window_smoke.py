@@ -936,3 +936,134 @@ def test_preview_without_frames_says_so(
     preview = window._preview_window
     assert preview is not None and not preview.image.has_image()
     assert preview.caption.text() == EMPTY_TEXT
+
+
+# --- подстройка пресета под железо ---------------------------------------------
+
+
+@pytest.fixture
+def cycles_project_loader(fixtures_dir: Path):
+    """Тот же проект, но сцена на Cycles: подстройка трогает только секцию Cycles."""
+    data = json.loads((fixtures_dir / PROJECT_FIXTURE).read_text(encoding="utf-8"))
+    for scene in data["scenes"]:
+        scene["engine"] = "CYCLES"
+
+    def loader(blender_path: str, blend_path: str, *, cancel) -> ProjectInfo:
+        info = ProjectInfo.model_validate(data)
+        info.file_path = blend_path
+        return info
+
+    return loader
+
+
+def _hardware(**kwargs):
+    from brm.core.hardware import HardwareInfo
+
+    def detector(*args, **_kwargs) -> HardwareInfo:
+        return HardwareInfo(**kwargs)
+
+    return detector
+
+
+def _ready_window(qapp, store, caps_loader, project_loader, blend_file: Path, detector=None) -> MainWindow:
+    window = MainWindow(
+        store,
+        capabilities_loader=caps_loader,
+        project_loader=project_loader,
+        hardware_detector=detector,
+    )
+    load_project(qapp, window, blend_file)
+    wait_until(qapp, lambda: window._hardware_task is None)
+    window.refresh_resolved_preset()
+    return window
+
+
+def test_tuning_lowers_the_tile_on_an_8gb_card(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Balanced просит tile 2048, а карта на 8 ГБ — в форме и в задаче должно быть 1024."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file,
+        _hardware(gpu_name="NVIDIA GeForce RTX 5070 Laptop GPU", vram_mb=8151, ram_mb=32189, cpu_threads=24),
+    )
+    assert window.resolved_preset is not None
+    assert window.resolved_preset.value("cycles.tile_size") == 1024
+    assert window.tuning is not None and window.tuning.notes == ["tile size 1024 (8 GB VRAM)"]
+
+    label = window.settings_form.tuning_label
+    assert not label.isHidden() and "tile size 1024" in label.text() and "8 GB VRAM" in label.text()
+
+    job = window.compose_job()
+    assert job is not None and job.overrides["cycles.tile_size"] == 1024
+
+
+def test_tuning_off_keeps_the_preset_as_written(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=r"D:\out"))
+    window = _ready_window(
+        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    assert window.resolved_preset.value("cycles.tile_size") == 1024
+
+    window.settings_form.tune_check.setChecked(False)
+    assert window.resolved_preset.value("cycles.tile_size") == 2048
+    assert window.tuning is None
+    assert window.settings_form.tuning_label.isHidden()
+    assert store.load().tune_for_hardware is False  # выбор переживёт перезапуск
+
+
+def test_unknown_hardware_changes_nothing_in_the_ui(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    window = _ready_window(qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware())
+    assert window.resolved_preset.value("cycles.tile_size") == 2048
+    assert window.tuning is None
+    assert "Hardware unknown" in window.settings_form.tuning_label.text()
+
+
+def test_hardware_probe_failure_is_not_fatal(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Нет nvidia-smi, нет прав, что угодно — рендер должен остаться рабочим."""
+
+    def broken(*args, **kwargs):
+        raise OSError("nvidia-smi exploded")
+
+    window = _ready_window(qapp, configured_store, caps_loader, cycles_project_loader, blend_file, broken)
+    assert window.hardware.vram_mb is None
+    assert window.resolved_preset.value("cycles.tile_size") == 2048
+    assert window.render_button.isEnabled()
+    assert any("nvidia-smi exploded" in line for line in window.log_view.lines())
+
+
+def test_small_card_also_drops_persistent_data(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=4096, ram_mb=8192)
+    )
+    job = window.compose_job()
+    assert job is not None
+    assert job.overrides["cycles.tile_size"] == 512
+    assert job.overrides["cycles.denoising_use_gpu"] is False
+    assert job.overrides["render.use_persistent_data"] is False
+
+
+def test_custom_value_beats_hardware_tuning(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Явно выставленное пользователем значение важнее автоматики."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    from brm.ui.settings_form import VIEW_EXPERT
+
+    window.settings_form.set_display_mode(VIEW_EXPERT)
+    row = window.settings_form.expert_form.rows["cycles.tile_size"]
+    row.set_mode(MODE_CUSTOM)
+    row.set_value(256)
+
+    job = window.compose_job()
+    assert job is not None and job.overrides["cycles.tile_size"] == 256

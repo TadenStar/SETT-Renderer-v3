@@ -221,6 +221,7 @@ class ParamRow(QWidget):
 class SettingsForm(QGroupBox):
     preset_changed = Signal(str)
     values_changed = Signal()
+    tuning_toggled = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Render Settings", parent)
@@ -233,6 +234,17 @@ class SettingsForm(QGroupBox):
         self.description_label = QLabel("", self)
         self.description_label.setWordWrap(True)
         set_role(self.description_label, "muted")
+
+        self.tune_check = QCheckBox("Tune for this machine", self)
+        self.tune_check.setToolTip(
+            "Trim the preset to the VRAM and RAM of this computer. Only memory layout is changed — "
+            "the rendered image stays the same."
+        )
+        self.tune_check.toggled.connect(self.tuning_toggled)
+        self.tuning_label = QLabel("", self)
+        self.tuning_label.setWordWrap(True)
+        set_role(self.tuning_label, "muted")
+        self.tuning_label.hide()
 
         self.view_combo = QComboBox(self)
         for title, value in _VIEWS:
@@ -277,6 +289,8 @@ class SettingsForm(QGroupBox):
         layout = QVBoxLayout(self)
         layout.addWidget(self.preset_combo)
         layout.addWidget(self.description_label)
+        layout.addWidget(self.tune_check)
+        layout.addWidget(self.tuning_label)
         layout.addLayout(view_row)
         layout.addWidget(self.stack, 1)
         layout.addWidget(self.skipped_label)
@@ -296,6 +310,33 @@ class SettingsForm(QGroupBox):
 
     def current_preset_name(self) -> str | None:
         return self.preset_combo.currentData()
+
+    def tuning_enabled(self) -> bool:
+        return self.tune_check.isChecked()
+
+    def set_tuning_enabled(self, enabled: bool) -> None:
+        self.tune_check.blockSignals(True)
+        self.tune_check.setChecked(enabled)
+        self.tune_check.blockSignals(False)
+
+    def show_tuning(self, hardware_summary: str, notes: list[str] | None) -> None:
+        """Строка под чекбоксом: что за машина и что именно урезано.
+
+        ``notes is None`` — подстройка выключена или железо неизвестно.
+        """
+        if not self.tune_check.isChecked():
+            self.tuning_label.hide()
+            return
+        if notes is None:
+            self.tuning_label.setText(f"{hardware_summary} — nothing to trim automatically")
+            set_role(self.tuning_label, "muted")
+        elif notes:
+            self.tuning_label.setText(f"{hardware_summary} — {', '.join(notes)}")
+            set_role(self.tuning_label, "ok")
+        else:
+            self.tuning_label.setText(f"{hardware_summary} — preset already fits")
+            set_role(self.tuning_label, "muted")
+        self.tuning_label.show()
 
     def display_mode(self) -> str:
         return self.view_combo.currentData()

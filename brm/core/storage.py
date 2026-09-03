@@ -51,6 +51,9 @@ class AppSettings(BaseModel):
     notifications: bool = True
     # Онбординг первого запуска (M8) показан хотя бы раз — неважно, приняли или закрыли.
     onboarding_seen: bool = False
+    # Урезать пресет под VRAM и RAM этой машины. По умолчанию включено:
+    # целевое железо — ноутбук с 8 ГБ VRAM, а пресеты писались под общий случай.
+    tune_for_hardware: bool = True
 
 
 def with_recent_project(

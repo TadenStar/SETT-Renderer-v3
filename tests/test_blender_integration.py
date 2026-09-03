@@ -296,3 +296,46 @@ def test_history_recorded_from_a_real_render(real_blender: str, tiny_blend: Path
     from brm.core.history import read_frame_times
     times = read_frame_times(plan.stats_path)
     assert len(times) == 3 and all(seconds > 0 for _frame, seconds in times)
+
+
+def test_hardware_tuned_preset_applies_on_real_blender(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Подстройка под железо: урезанный tile size реально принимается Blender'ом.
+
+    Проверяется вся цепочка — проба железа, урезание пресета, резолвер,
+    override-скрипт — и то, что Blender подтверждает присваивание строкой OK.
+    """
+    from brm.core.hardware import HardwareInfo, detect_hardware
+    from brm.core.hardware_tuning import TILE_SIZE, tune_preset
+
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+
+    # Проба на этой машине обязана отработать без исключений, но её результат
+    # зависит от железа, поэтому дальше берём фиксированную карту на 8 ГБ.
+    assert detect_hardware().cpu_threads >= 1
+    hardware = HardwareInfo(gpu_name="Test card", vram_mb=8151, ram_mb=32189, cpu_threads=24)
+
+    balanced = next(p for p in load_presets() if p.name == "Balanced")
+    assert balanced.cycles[TILE_SIZE] == 2048  # пресет писался под общий случай
+    tuning = tune_preset(balanced, hardware, engine="CYCLES")
+    assert tuning.changes[TILE_SIZE] == 1024
+
+    resolved = resolve_preset(tuning.preset, caps, "CYCLES")
+    overrides = compose_overrides(resolved)
+    overrides.update({"cycles.samples": 4, "render.resolution_x": 96, "render.resolution_y": 64})
+    job = RenderJob(
+        blend_path=str(tiny_blend),
+        engine="CYCLES",
+        preset=balanced.name,
+        frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
+        overrides=overrides,
+    )
+    plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path / "out")), info, tmp_dir=tmp_path / "tmp")
+    result = run_blender(plan.argv[0], plan.argv[1:], timeout=600)
+    assert result.ok, result.tail(60)
+
+    brm = result.brm_lines()
+    assert not [line for line in brm if line.startswith("[BRM] FAIL")], brm
+    assert "[BRM] OK   cycles.tile_size = 1024" in brm
+    assert "[BRM] OK   cycles.use_auto_tile = True" in brm
+    assert (plan.output_dir / "0001.png").is_file()
