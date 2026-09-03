@@ -66,6 +66,19 @@ def unique_log_path(output_dir: str | os.PathLike[str], now: datetime | None = N
     return directory / f"{stem}_{uuid.uuid4().hex[:6]}.txt"
 
 
+def resolve_output_path(job: RenderJob, settings: AppSettings, scene_name: str) -> str:
+    """Куда лягут кадры этой задачи. Без побочных эффектов: план пишет override-скрипт,
+    а превью и подобным нужен только путь."""
+    output_base = settings.default_output_dir or str(Path(job.blend_path).parent)
+    return expand_output_template(
+        job.output_template,
+        output_dir=output_base,
+        project=job.project_name,
+        scene=scene_name,
+        preset=job.preset,
+    )
+
+
 def build_render_plan(
     job: RenderJob,
     caps: Capabilities,
@@ -89,14 +102,7 @@ def build_render_plan(
     else:
         frames = resolve_frames(job.frame_range, scene_start=scene.frame_start, scene_end=scene.frame_end)
 
-    output_base = settings.default_output_dir or str(Path(job.blend_path).parent)
-    output_path = expand_output_template(
-        job.output_template,
-        output_dir=output_base,
-        project=job.project_name,
-        scene=scene.name,
-        preset=job.preset,
-    )
+    output_path = resolve_output_path(job, settings, scene.name)
     output_dir = Path(output_path).parent
 
     engine = job.engine or scene.engine
