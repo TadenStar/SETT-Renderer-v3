@@ -49,6 +49,8 @@ class AppSettings(BaseModel):
     # Собирать видео сразу после успешного рендера (M6).
     auto_build_video: bool = False
     notifications: bool = True
+    # Онбординг первого запуска (M8) показан хотя бы раз — неважно, приняли или закрыли.
+    onboarding_seen: bool = False
 
 
 def with_recent_project(

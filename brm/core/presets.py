@@ -18,11 +18,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from brm.core.app_paths import package_root
 from brm.core.storage import app_data_dir
 
 log = logging.getLogger(__name__)
 
-BUILTIN_PRESETS_DIR = Path(__file__).resolve().parent.parent / "resources" / "presets"
+BUILTIN_PRESETS_DIR = package_root() / "brm" / "resources" / "presets"
 EEVEE_ALIAS = "EEVEE"
 
 

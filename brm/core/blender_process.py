@@ -14,7 +14,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+from brm.core.app_paths import package_root
+
+SCRIPTS_DIR = package_root() / "brm" / "scripts"
 
 
 @dataclass

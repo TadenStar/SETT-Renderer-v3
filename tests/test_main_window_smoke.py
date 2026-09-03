@@ -736,3 +736,81 @@ def test_history_recording_never_crashes_the_finish_handler(
 
     assert "Finished" in window.log_view.status_label.text()
     assert any("SKIP history: disk on fire" in line for line in window.log_view.lines())
+
+
+# --- онбординг первого запуска (M8) ------------------------------------------------
+
+
+def test_onboarding_shown_once_and_flag_set_on_accept(qapp, settings_path: Path, fake_blender: Path, caps_loader) -> None:
+    from PySide6.QtCore import QTimer
+
+    from brm.ui import main_window as main_window_mod
+    from brm.ui.onboarding_dialog import OnboardingDialog
+
+    window = MainWindow(SettingsStore(settings_path))
+    assert not SettingsStore(settings_path).load().onboarding_seen
+
+    shown: list[OnboardingDialog] = []
+    real_init = OnboardingDialog.__init__
+
+    def spy_init(self, settings, parent=None):
+        real_init(self, settings, parent)
+        self.blender_edit.setText(str(fake_blender))
+        shown.append(self)
+        QTimer.singleShot(0, self.accept)  # закрываем модальный цикл уже после его старта
+
+    main_window_mod.OnboardingDialog.__init__ = spy_init
+    try:
+        window.maybe_show_onboarding()
+    finally:
+        main_window_mod.OnboardingDialog.__init__ = real_init
+
+    assert len(shown) == 1
+    assert window.settings.onboarding_seen is True
+    assert window.settings.blender_path == str(fake_blender)
+    assert SettingsStore(settings_path).load().onboarding_seen is True
+
+    # Второй вызов — диалог больше не показывается.
+    window.maybe_show_onboarding()
+    assert len(shown) == 1
+
+
+def test_onboarding_flag_set_even_when_cancelled(qapp, settings_path: Path) -> None:
+    from PySide6.QtCore import QTimer
+
+    from brm.ui import main_window as main_window_mod
+    from brm.ui.onboarding_dialog import OnboardingDialog
+
+    window = MainWindow(SettingsStore(settings_path))
+    real_init = OnboardingDialog.__init__
+
+    def spy_init(self, settings, parent=None):
+        real_init(self, settings, parent)
+        QTimer.singleShot(0, self.reject)  # пользователь закрыл диалог, ничего не заполнив
+
+    main_window_mod.OnboardingDialog.__init__ = spy_init
+    try:
+        window.maybe_show_onboarding()
+    finally:
+        main_window_mod.OnboardingDialog.__init__ = real_init
+
+    assert window.settings.onboarding_seen is True
+    assert window.settings.blender_path is None  # путь не тронут — Cancel не сохраняет поля
+
+
+def test_onboarding_skipped_when_already_seen(qapp, settings_path: Path) -> None:
+    from brm.ui import main_window as main_window_mod
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(onboarding_seen=True))
+    window = MainWindow(store)
+
+    calls = []
+    main_window_mod.OnboardingDialog = type("Spy", (), {"__init__": lambda self, *a, **k: calls.append(1)})
+    try:
+        window.maybe_show_onboarding()
+    finally:
+        from brm.ui.onboarding_dialog import OnboardingDialog
+        main_window_mod.OnboardingDialog = OnboardingDialog
+
+    assert calls == []

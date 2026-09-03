@@ -48,7 +48,7 @@ from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
 from brm.core.queue import QueueStore, RenderQueue
 from brm.core.render_plan import RenderPlan
 from brm.core.render_stats import diagnose_failure, format_duration
-from brm.core.storage import SettingsStore, cache_dir, tmp_dir, with_recent_project
+from brm.core.storage import AppSettings, SettingsStore, cache_dir, tmp_dir, with_recent_project
 from brm.core.system_actions import SHUTDOWN_DELAY_S, cancel_shutdown, schedule_shutdown
 from brm.core.video_runner import VIDEO_SUCCESS, VideoProcess, describe_result
 from brm.ui.banner import WarningBanner
@@ -58,6 +58,7 @@ from brm.ui.notifications import Notifier
 from brm.ui.progress_panel import ProgressPanel
 from brm.ui.project_panel import ProjectPanel, blend_paths_from_mime
 from brm.ui.queue_view import QueueView
+from brm.ui.onboarding_dialog import OnboardingDialog
 from brm.ui.settings_dialog import SettingsDialog
 from brm.ui.settings_form import SettingsForm
 from brm.ui.theme import apply_theme
@@ -838,13 +839,32 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.settings, self)
         dialog.focus_blender_path()
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.settings = dialog.result_settings()
-            self._store.save(self.settings)
-            apply_theme(QApplication.instance(), self.settings.theme)
-            self.project_panel.set_default_output_dir(self.settings.default_output_dir or "")
-            self.notifier.enabled = self.settings.notifications
-            self.refresh_ffmpeg_status()
-            self.reprobe_blender()
+            self._apply_settings(dialog.result_settings())
+
+    def maybe_show_onboarding(self) -> None:
+        """Модальный онбординг первого запуска (раздел 4.1, п.3): сразу просит путь к Blender.
+
+        Флаг ставится при любом закрытии, не только по OK — иначе диалог будет
+        всплывать на каждом старте, а для этого уже есть постоянный баннер.
+        """
+        if self.settings.onboarding_seen:
+            return
+        dialog = OnboardingDialog(self.settings, self)
+        dialog.focus_blender_path()
+        result = self.settings
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            result = dialog.result_settings()
+        self._apply_settings(result.model_copy(update={"onboarding_seen": True}))
+
+    def _apply_settings(self, settings: AppSettings) -> None:
+        """Общий хвост после диалога настроек — и обычного, и онбординга."""
+        self.settings = settings
+        self._store.save(self.settings)
+        apply_theme(QApplication.instance(), self.settings.theme)
+        self.project_panel.set_default_output_dir(self.settings.default_output_dir or "")
+        self.notifier.enabled = self.settings.notifications
+        self.refresh_ffmpeg_status()
+        self.reprobe_blender()
 
     def save_video_choice(self) -> None:
         """Пресет кодека и автосборка запоминаются между запусками."""
