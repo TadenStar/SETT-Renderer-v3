@@ -10,7 +10,11 @@ import pytest
 
 from brm.core.blender_process import run_blender
 from brm.core.capabilities import get_capabilities, run_probe, support_problem
+from brm.core.frame_range import FrameRange, FrameRangeMode
+from brm.core.models import RenderJob
 from brm.core.project_probe import probe_project, project_warnings
+from brm.core.render_plan import build_render_plan
+from brm.core.storage import AppSettings
 
 pytestmark = pytest.mark.blender
 
@@ -65,3 +69,35 @@ def test_project_probe_on_default_scene(real_blender: str, tiny_blend: Path, tmp
     assert info.blender_version[:2] == info.blender_version_file[:2]
     assert Path(info.file_path).name == tiny_blend.name
     assert project_warnings(info) == []
+
+
+def test_render_one_frame_with_override(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Критерий M2: один кадр рендерится, override применился, PNG на диске."""
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+    job = RenderJob(
+        blend_path=str(tiny_blend),
+        engine="CYCLES",
+        frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
+        overrides={
+            "scene.render.resolution_x": 64,
+            "scene.render.resolution_y": 64,
+            "scene.render.resolution_percentage": 100,
+            "scene.cycles.samples": 4,
+            "scene.cycles.use_denoising": False,
+            "scene.cycles.no_such_property": 1,  # должно попасть в SKIP, а не уронить рендер
+        },
+    )
+    settings = AppSettings(default_output_dir=str(tmp_path / "out"))
+    plan = build_render_plan(job, caps, settings, info, tmp_dir=tmp_path / "tmp")
+
+    result = run_blender(plan.argv[0], plan.argv[1:], timeout=600)
+    assert result.ok, result.tail(60)
+    brm = result.brm_lines()
+    assert "[BRM] OK   scene.render.engine = 'CYCLES'" in brm
+    assert "[BRM] OK   scene.cycles.samples = 4" in brm
+    assert "[BRM] SKIP scene.cycles.no_such_property: not available in this Blender build" in brm
+    assert any("override applied: ok=" in line and "fail=0" in line for line in brm)
+    png = plan.output_dir / "0001.png"
+    assert png.is_file() and png.stat().st_size > 0
+    assert "Saved:" in result.stdout

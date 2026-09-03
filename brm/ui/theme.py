@@ -35,6 +35,12 @@ DARK = {
     "primary_text": "#0F1F17",
     "primary_disabled": "#245C42",
     "primary_disabled_text": "#6E8F80",
+    "danger": "#C9403D",
+    "danger_hover": "#D94F4C",
+    "danger_text": "#FFFFFF",
+    "danger_disabled": "#4A2A2A",
+    "danger_disabled_text": "#8A6A6A",
+    "mono_font": '"Cascadia Mono", Consolas, "Courier New", monospace',
     "warning": "#E8A33D",
     "error": "#EF6B6B",
     "ok": "#5CC48A",
@@ -62,6 +68,12 @@ LIGHT = {
     "primary_text": "#FFFFFF",
     "primary_disabled": "#BFE6D2",
     "primary_disabled_text": "#7FA892",
+    "danger": "#D9413F",
+    "danger_hover": "#C43533",
+    "danger_text": "#FFFFFF",
+    "danger_disabled": "#F0C9C8",
+    "danger_disabled_text": "#B08080",
+    "mono_font": '"Cascadia Mono", Consolas, "Courier New", monospace',
     "warning": "#B85C00",
     "error": "#C62828",
     "ok": "#2E7D32",
@@ -124,6 +136,17 @@ QPushButton#primaryButton {
 }
 QPushButton#primaryButton:hover { background: $primary_hover; }
 QPushButton#primaryButton:disabled { background: $primary_disabled; color: $primary_disabled_text; }
+QPushButton#dangerButton {
+    background: $danger;
+    color: $danger_text;
+    border: none;
+    font-weight: 600;
+    padding: 8px 22px;
+}
+QPushButton#dangerButton:hover { background: $danger_hover; }
+QPushButton#dangerButton:disabled { background: $danger_disabled; color: $danger_disabled_text; }
+QPlainTextEdit#logText { font-family: $mono_font; font-size: 9pt; }
+QLineEdit#commandLine { font-family: $mono_font; }
 QLabel[role="muted"] { color: $muted; }
 QLabel[role="warning"] { color: $warning; }
 QLabel[role="error"] { color: $error; }

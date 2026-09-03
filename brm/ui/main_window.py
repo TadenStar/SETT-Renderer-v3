@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from brm import __author__, __version__
 from brm.core.blender_locator import validate_blender_path
 from brm.core.capabilities import Capabilities, get_capabilities, support_problem
 from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
+from brm.core.render_plan import RenderPlan, build_render_plan
+from brm.core.runner import STATUS_FAILED, STATUS_STOPPED, STATUS_SUCCESS, RenderProcess
 from brm.core.storage import SettingsStore, cache_dir, tmp_dir, with_recent_project
 from brm.ui.banner import WarningBanner
 from brm.ui.log_view import LogView
@@ -78,6 +81,12 @@ class MainWindow(QMainWindow):
         self.project: ProjectInfo | None = None
         self._caps_task: FunctionTask | None = None
         self._project_task: FunctionTask | None = None
+
+        self.render_process = RenderProcess(self)
+        self.render_process.line_received.connect(self._on_render_line)
+        self.render_process.finished.connect(self._on_render_finished)
+        self.current_plan: RenderPlan | None = None
+        self._render_started_at = 0.0
 
         self.setWindowTitle(f"BRM — Blender Render Manager {__version__}")
         self.resize(1200, 760)
@@ -137,7 +146,15 @@ class MainWindow(QMainWindow):
         self.render_button = QPushButton("Render", top)
         self.render_button.setObjectName("primaryButton")  # единственная акцентная кнопка
         self.render_button.setMinimumWidth(140)
+        self.render_button.clicked.connect(self.start_render)
         top_layout.addWidget(self.render_button, 0)
+        self.stop_button = QPushButton("Stop", top)
+        self.stop_button.setObjectName("dangerButton")
+        self.stop_button.setMinimumWidth(100)
+        self.stop_button.setEnabled(False)
+        self.stop_button.setToolTip("Stop after terminate; kill if Blender ignores it for 5 s")
+        self.stop_button.clicked.connect(self.stop_render)
+        top_layout.addWidget(self.stop_button, 0)
         root.addWidget(top)
 
         self.project_panel = ProjectPanel()
@@ -247,8 +264,8 @@ class MainWindow(QMainWindow):
 
     def _show_blender_ok(self, caps: Capabilities) -> None:
         self.banner.hide()
-        self.render_button.setEnabled(True)
-        self.render_button.setToolTip("Start render (coming in M2)")
+        self.render_button.setEnabled(not self.render_process.is_running())
+        self.render_button.setToolTip("Start rendering the current project")
         engines = ", ".join(caps.engines)
         self.blender_label.setText(
             f"Blender {caps.version_string} · Cycles device: {caps.best_cycles_device()} · {engines}"
@@ -298,6 +315,59 @@ class MainWindow(QMainWindow):
         self.project = None
         self.project_panel.set_error(f"Could not read {Path(task.tag).name}: {message}")
 
+    # --- рендер ------------------------------------------------------------------
+
+    def start_render(self) -> None:
+        if self.render_process.is_running():
+            return
+        if self.capabilities is None:
+            self.log_view.set_status("Configure a working Blender first", "error")
+            return
+        job = self.project_panel.current_job()
+        if job is None or self.project is None:
+            self.log_view.set_status("Load a project first", "error")
+            return
+        try:
+            plan = build_render_plan(job, self.capabilities, self.settings, self.project, tmp_dir=tmp_dir())
+        except ValueError as exc:
+            self.log_view.set_status(str(exc), "error")
+            return
+        self.current_plan = plan
+        self.log_view.clear()
+        self.log_view.set_command(plan.command_line)
+        self.log_view.append_line(f"[BRM] output: {plan.output_path}")
+        self.log_view.append_line(f"[BRM] log file: {plan.log_path}")
+        self.log_view.set_status(f"Rendering {len(plan.frames)} frame(s)…", "muted")
+        self._render_started_at = time.monotonic()
+        self.render_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.render_process.start(plan)
+
+    def stop_render(self) -> None:
+        if self.render_process.is_running():
+            self.log_view.set_status("Stopping…", "warning")
+            self.render_process.stop()
+
+    def _on_render_line(self, line: str) -> None:
+        self.log_view.append_line(line)
+
+    def _on_render_finished(self, exit_code: int, status: str) -> None:
+        elapsed = time.monotonic() - self._render_started_at
+        plan = self.current_plan
+        frames = len(plan.frames) if plan else 0
+        if status == STATUS_SUCCESS:
+            self.log_view.set_status(f"Finished: {frames} frame(s) in {elapsed:.0f} s", "ok")
+        elif status == STATUS_STOPPED:
+            self.log_view.set_status(f"Stopped by user after {elapsed:.0f} s", "warning")
+        elif status == STATUS_FAILED:
+            self.log_view.set_status(f"Blender exited with code {exit_code} after {elapsed:.0f} s. See the log", "error")
+        else:
+            self.log_view.set_status("Blender crashed or could not start. See the log", "error")
+        if plan is not None:
+            self.log_view.append_line(f"[BRM] finished: status={status} exit_code={exit_code} log={plan.log_path}")
+        self.stop_button.setEnabled(False)
+        self.refresh_blender_status()
+
     # --- фоновые задачи ------------------------------------------------------
 
     def _begin_task(self, text: str) -> None:
@@ -346,6 +416,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — имя из Qt
         self.cancel_tasks()
+        if self.render_process.is_running():
+            self.render_process.stop()
         super().closeEvent(event)
 
     def event(self, event: QEvent) -> bool:

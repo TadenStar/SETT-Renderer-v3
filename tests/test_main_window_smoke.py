@@ -6,31 +6,22 @@
 from __future__ import annotations
 
 import json
-import time
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from qt_helpers import wait_until
 
 from brm.core.capabilities import Capabilities, CapabilitiesError
 from brm.core.frame_range import FrameRangeMode
 from brm.core.project_probe import ProjectInfo, ProjectProbeError
 from brm.core.storage import AppSettings, SettingsStore
+from brm.ui import main_window as main_window_mod
+from brm.ui.log_view import LogView
 from brm.ui.main_window import MainWindow
 from brm.ui.settings_dialog import SettingsDialog
 
 CAPS_FIXTURE = "capabilities_blender_5.0.1.json"
 PROJECT_FIXTURE = "project_default_scene_5.0.1.json"
-
-
-def wait_until(qapp, predicate: Callable[[], bool], timeout: float = 5.0) -> None:
-    """Крутит цикл событий, пока условие не выполнится: сигналы из потоков приходят через очередь."""
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        qapp.processEvents()
-        time.sleep(0.01)
-        if time.monotonic() > deadline:
-            raise AssertionError("Timed out waiting for the UI state")
 
 
 @pytest.fixture
@@ -201,6 +192,62 @@ def test_open_project_requires_blender_and_existing_file(qapp, settings_path: Pa
     assert "Configure a working Blender first" in window.project_panel.summary_label.text()
     window.open_project(str(tmp_path / "missing.blend"))
     assert "File not found" in window.project_panel.summary_label.text()
+
+
+def test_log_view_filters_and_copy(qapp) -> None:
+    view = LogView()
+    for line in ("Fra:1 Mem:10M", "[BRM] OK   scene = 'Scene'", "Error: boom", "[BRM] FAIL x: nope"):
+        view.append_line(line)
+    assert view.text.toPlainText().count("\n") == 3
+
+    view.filter_combo.setCurrentIndex(1)  # [BRM] only
+    assert view.text.toPlainText().splitlines() == ["[BRM] OK   scene = 'Scene'", "[BRM] FAIL x: nope"]
+    view.filter_combo.setCurrentIndex(2)  # Errors
+    assert view.text.toPlainText().splitlines() == ["Error: boom", "[BRM] FAIL x: nope"]
+    view.append_line("Saved: 'x'")  # не ошибка — в фильтре не показывается, в памяти есть
+    assert "Saved" not in view.text.toPlainText() and "Saved: 'x'" in view.lines()
+
+    assert not view.copy_button.isEnabled()
+    view.set_command('"C:\\b.exe" -b "a.blend"')
+    assert view.copy_button.isEnabled()
+    view.copy_command()
+    assert qapp.clipboard().text() == '"C:\\b.exe" -b "a.blend"'
+    assert view.status_label.text() == "Command copied"
+
+
+def test_render_button_requires_project(qapp, configured_store: SettingsStore, caps_loader) -> None:
+    window = MainWindow(configured_store, capabilities_loader=caps_loader)
+    wait_until(qapp, lambda: window.capabilities is not None)
+    window.start_render()
+    assert "Load a project first" in window.log_view.status_label.text()
+    assert not window.render_process.is_running()
+
+
+def test_start_render_reports_unstartable_blender(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Поддельный blender.exe запуститься не может: статус crashed, кнопки возвращаются, лог на диске."""
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    monkeypatch.setattr(main_window_mod, "tmp_dir", lambda: tmp_path / "brm_tmp")
+    window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
+    wait_until(qapp, lambda: window.capabilities is not None)
+    window.open_project(str(blend_file))
+    wait_until(qapp, lambda: window.project is not None)
+
+    window.start_render()
+    assert window.current_plan is not None
+    assert window.log_view.command().startswith(f'"{fake_blender}"')
+    assert " -S Scene " in window.log_view.command()
+    wait_until(qapp, lambda: window.render_process.status is not None, timeout=20)
+
+    assert window.render_process.status == "crashed"
+    assert "crashed" in window.log_view.status_label.text()
+    assert window.render_button.isEnabled() and not window.stop_button.isEnabled()
+    assert any("could not start" in line for line in window.log_view.lines())
+    assert window.current_plan.log_path.is_file()
+    assert "status=crashed" in window.current_plan.log_path.read_text(encoding="utf-8")
+    assert window.current_plan.override_script.is_file()
 
 
 def test_author_credit_is_shown(qapp, settings_path: Path) -> None:
