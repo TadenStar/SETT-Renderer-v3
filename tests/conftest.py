@@ -55,6 +55,17 @@ def real_blender() -> str:
 
 
 @pytest.fixture(scope="session")
+def real_ffmpeg() -> str:
+    from brm.core.ffmpeg import find_ffmpeg
+
+    override = os.environ.get("BRM_FFMPEG")
+    path = override if override and Path(override).is_file() else find_ffmpeg()
+    if not path:
+        pytest.skip("ffmpeg not found; set BRM_FFMPEG to run video integration tests")
+    return path
+
+
+@pytest.fixture(scope="session")
 def qapp():
     from PySide6.QtWidgets import QApplication
 

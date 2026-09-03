@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "Vertical 9:16",
+  "order": 40,
+  "description": "Ad creative for social: scaled to 1080x1920 with lanczos, H.264 CRF 18, high profile, faststart. Pairs with the Social 9:16 render preset.",
+  "extension": "mp4",
+  "width": 1080,
+  "height": 1920,
+  "video_filter": "scale={width}:{height}:flags=lanczos",
+  "args": [
+    "-c:v", "libx264",
+    "-crf", "18",
+    "-preset", "slow",
+    "-pix_fmt", "yuv420p",
+    "-profile:v", "high",
+    "-level", "4.1"
+  ],
+  "faststart": true
+}

@@ -441,3 +441,148 @@ def test_settings_dialog_ok_follows_validation(qapp, fake_blender: Path) -> None
     result = dialog.result_settings()
     assert result.blender_path == str(fake_blender) and result.default_output_dir == r"D:\out"
     assert result.ffmpeg_path is None and result.theme == "light"
+
+
+# --- видео, уведомления, выключение (M6) ---------------------------------------------
+
+
+@pytest.fixture
+def fake_ffmpeg(tmp_path: Path) -> Path:
+    exe = tmp_path / "ffmpeg.exe"
+    exe.write_bytes(b"MZ")
+    return exe
+
+
+def rendered_sequence(directory: Path, frames: int = 3) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    for frame in range(1, frames + 1):
+        (directory / f"{frame:04d}.png").write_bytes(b"x" * 200)
+    return directory / "####"
+
+
+def test_video_panel_disabled_without_ffmpeg(qapp, configured_store: SettingsStore, caps_loader) -> None:
+    window = MainWindow(configured_store, capabilities_loader=caps_loader)
+    panel = window.video_panel
+    assert not panel.build_button.isEnabled() and not panel.preset_combo.isEnabled()
+    assert "ffmpeg.exe is not set" in panel.status_label.text()
+    assert [panel.preset_combo.itemText(i) for i in range(panel.preset_combo.count())][0] == "H.264"
+    window.build_video()
+    assert "ffmpeg" in panel.status_label.text()
+    assert not window.video_process.is_running()
+
+
+def test_video_build_composes_argv_and_runs(qapp, settings_path: Path, fake_blender: Path, fake_ffmpeg: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), ffmpeg_path=str(fake_ffmpeg), default_output_dir=str(tmp_path / "out")))
+    window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
+    load_project(qapp, window, blend_file)
+    assert window.video_panel.build_button.isEnabled()
+
+    pattern = rendered_sequence(tmp_path / "out" / "Пещера v3" / "Scene", frames=4)
+    assert window.build_video(str(pattern)) is True
+    argv = window.video_process.argv
+    assert Path(argv[0]) == fake_ffmpeg
+    assert argv[argv.index("-framerate") + 1] == "24"          # fps сцены из фикстуры
+    assert argv[argv.index("-i") + 1].endswith("%04d.png")
+    assert argv[argv.index("-crf") + 1] == "17"                # пресет H.264
+    assert argv[-1].endswith("Scene_h264.mp4")
+    assert window.video_process.progress.total_frames == 4
+    wait_until(qapp, lambda: window.video_process.status is not None, timeout=20)
+    assert window.video_process.status == "crashed"            # поддельный ffmpeg не запускается
+    assert "failed" in window.video_panel.status_label.text()
+
+
+def test_video_reports_missing_sequence(qapp, settings_path: Path, fake_blender: Path, fake_ffmpeg: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), ffmpeg_path=str(fake_ffmpeg), default_output_dir=str(tmp_path / "out")))
+    window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
+    load_project(qapp, window, blend_file)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert window.build_video(str(empty / "####")) is False
+    assert "No rendered frames" in window.video_panel.status_label.text()
+    assert window.build_video(str(tmp_path / "gone" / "####")) is False
+    assert "does not exist" in window.video_panel.status_label.text()
+
+
+def test_auto_build_runs_before_the_queue_moves_on(qapp, settings_path: Path, fake_blender: Path, fake_ffmpeg: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, queue_store: QueueStore, monkeypatch) -> None:
+    """Видео собирается до перехода к следующей задаче и до автовыключения."""
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), ffmpeg_path=str(fake_ffmpeg), default_output_dir=str(tmp_path / "out"), shutdown_after_queue=True))
+    builder = FakePlanBuilder(tmp_path, base_frames=[1, 2], delay=0.05)
+    window = make_window(store, caps_loader=caps_loader, project_loader=project_loader, queue_store=queue_store, fake_builder=builder, monkeypatch=monkeypatch)
+    load_project(qapp, window, blend_file)
+    window.project_panel.resume_check.setChecked(False)
+    window.video_panel.set_auto_build(True)
+
+    order: list[str] = []
+    real_build = window.build_video
+    monkeypatch.setattr(window, "build_video", lambda path=None: (order.append("video"), real_build(path))[1])
+    monkeypatch.setattr(window, "maybe_shutdown", lambda: order.append("shutdown"))
+
+    window.add_current_to_queue()
+    window.run_queue()
+    wait_until(qapp, lambda: not window._queue_running and window.video_process.status is not None, timeout=60)
+    assert order == ["video", "shutdown"]  # видео строго перед выключением
+    assert window.queue.items[0].status == "done"
+
+
+def test_shutdown_banner_and_cancel(qapp, configured_store: SettingsStore, caps_loader, monkeypatch) -> None:
+    from brm.core import system_actions
+    from brm.ui import main_window as main_window_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(main_window_mod, "schedule_shutdown", lambda delay=60: (calls.append(f"schedule {delay}"), system_actions.ActionResult(True, "ok"))[1])
+    monkeypatch.setattr(main_window_mod, "cancel_shutdown", lambda: (calls.append("cancel"), system_actions.ActionResult(True, "Shutdown cancelled"))[1])
+
+    window = MainWindow(configured_store, capabilities_loader=caps_loader)
+    assert window.shutdown_banner.isHidden()
+    window.maybe_shutdown()  # выключение выключено в настройках
+    assert calls == [] and window.shutdown_banner.isHidden()
+
+    window.settings = window.settings.model_copy(update={"shutdown_after_queue": True})
+    window.maybe_shutdown()
+    assert calls == ["schedule 60"]
+    assert not window.shutdown_banner.isHidden() and "shut down in 60 s" in window.shutdown_banner.message()
+    window.maybe_shutdown()  # повторно не планируем
+    assert calls == ["schedule 60"]
+
+    window.cancel_shutdown()
+    assert calls[-1] == "cancel" and window.shutdown_banner.isHidden()
+    assert any("Shutdown cancelled" in line for line in window.log_view.lines())
+
+
+def test_shutdown_failure_is_reported_not_raised(qapp, configured_store: SettingsStore, caps_loader, monkeypatch) -> None:
+    from brm.core import system_actions
+    from brm.ui import main_window as main_window_mod
+
+    monkeypatch.setattr(main_window_mod, "schedule_shutdown", lambda delay=60: system_actions.ActionResult(False, "Access is denied."))
+    window = MainWindow(configured_store, capabilities_loader=caps_loader)
+    window.settings = window.settings.model_copy(update={"shutdown_after_queue": True})
+    window.maybe_shutdown()
+    assert window.shutdown_banner.isHidden()
+    assert any("SKIP shutdown: Access is denied." in line for line in window.log_view.lines())
+
+
+def test_notifier_survives_missing_tray(qapp) -> None:
+    from brm.ui.notifications import Notifier
+
+    notifier = Notifier()
+    if notifier.available:
+        assert notifier.notify("t", "m") is True
+        notifier.enabled = False
+        assert notifier.notify("t", "m") is False
+    else:
+        assert notifier.notify("t", "m") is False
+    notifier.hide()
+
+
+def test_video_choice_is_saved_on_close(qapp, settings_path: Path, fake_blender: Path, fake_ffmpeg: Path, caps_loader) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), ffmpeg_path=str(fake_ffmpeg)))
+    window = MainWindow(store, capabilities_loader=caps_loader)
+    window.video_panel.preset_combo.setCurrentIndex(1)  # ProRes
+    window.video_panel.set_auto_build(True)
+    window.close()
+    saved = store.load()
+    assert saved.last_video_preset == "ProRes 422 HQ" and saved.auto_build_video is True

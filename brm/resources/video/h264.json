@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "H.264",
+  "order": 10,
+  "description": "Universal delivery: CRF 17 is visually identical to the source, plays everywhere. Slow preset gives the best bitrate for the same quality.",
+  "extension": "mp4",
+  "args": [
+    "-c:v", "libx264",
+    "-crf", "17",
+    "-preset", "slow",
+    "-pix_fmt", "yuv420p",
+    "-colorspace", "bt709",
+    "-color_primaries", "bt709",
+    "-color_trc", "bt709"
+  ],
+  "faststart": true
+}

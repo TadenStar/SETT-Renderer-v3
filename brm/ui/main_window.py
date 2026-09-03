@@ -28,6 +28,16 @@ from PySide6.QtWidgets import (
 from brm import __author__, __version__
 from brm.core.blender_locator import validate_blender_path
 from brm.core.capabilities import Capabilities, get_capabilities, support_problem
+from brm.core.ffmpeg import (
+    FfmpegError,
+    VideoPreset,
+    build_ffmpeg_argv,
+    default_output_file,
+    find_sequence,
+    find_video_preset,
+    load_video_presets,
+    validate_ffmpeg_path,
+)
 from brm.core.job_runner import RUN_FAILED, RUN_PAUSED, RUN_STOPPED, RUN_SUCCESS, JobRunner
 from brm.core.log_parser import KIND_OTHER
 from brm.core.models import RenderJob
@@ -38,14 +48,18 @@ from brm.core.queue import QueueStore, RenderQueue
 from brm.core.render_plan import RenderPlan
 from brm.core.render_stats import diagnose_failure, format_duration
 from brm.core.storage import SettingsStore, cache_dir, tmp_dir, with_recent_project
+from brm.core.system_actions import SHUTDOWN_DELAY_S, cancel_shutdown, schedule_shutdown
+from brm.core.video_runner import VIDEO_SUCCESS, VideoProcess, describe_result
 from brm.ui.banner import WarningBanner
 from brm.ui.log_view import LogView
+from brm.ui.notifications import Notifier
 from brm.ui.progress_panel import ProgressPanel
 from brm.ui.project_panel import ProjectPanel, blend_paths_from_mime
 from brm.ui.queue_view import QueueView
 from brm.ui.settings_dialog import SettingsDialog
 from brm.ui.settings_form import SettingsForm
 from brm.ui.theme import apply_theme
+from brm.ui.video_panel import VideoPanel
 from brm.ui.workers import FunctionTask
 
 CREDIT_TEXT = f"Made by {__author__}"
@@ -105,9 +119,19 @@ class MainWindow(QMainWindow):
         self.queue: RenderQueue = self.queue_store.load()
         self._queue_running = False
         self._active_queue_item: str | None = None
+        self._queue_finished_pending = False
+        self._pending_job_result: tuple[str, int, int] | None = None
 
         self.presets: list[Preset] = load_presets()
         self.resolved_preset: ResolvedPreset | None = None
+        self.video_presets: list[VideoPreset] = load_video_presets()
+        self.video_process = VideoProcess(self)
+        self.video_process.line_received.connect(self._on_video_line)
+        self.video_process.progress_changed.connect(self._on_video_progress)
+        self.video_process.finished.connect(self._on_video_finished)
+        self.notifier = Notifier(self)
+        self.notifier.enabled = self.settings.notifications
+        self._shutdown_pending = False
 
         self.setWindowTitle(f"BRM — Blender Render Manager {__version__}")
         self.resize(1200, 760)
@@ -121,6 +145,9 @@ class MainWindow(QMainWindow):
         self.settings_form.preset_changed.connect(self._on_preset_changed)
         self.project_panel.scene_combo.currentTextChanged.connect(lambda _name: self.refresh_resolved_preset())
         self.queue_view.set_items(self.queue.items)
+        self.video_panel.set_presets(self.video_presets, self.settings.last_video_preset)
+        self.video_panel.set_auto_build(self.settings.auto_build_video)
+        self.refresh_ffmpeg_status()
         self.refresh_blender_status()
 
     # --- построение ----------------------------------------------------------
@@ -163,6 +190,13 @@ class MainWindow(QMainWindow):
         self.banner.action_clicked.connect(self.open_settings)
         root.addWidget(self.banner)
 
+        # Отдельная плашка на время обратного отсчёта выключения.
+        self.shutdown_banner = WarningBanner(central)
+        self.shutdown_banner.set_button_text("Cancel shutdown")
+        self.shutdown_banner.action_clicked.connect(self.cancel_shutdown)
+        self.shutdown_banner.hide()
+        root.addWidget(self.shutdown_banner)
+
         top = QWidget(central)
         top_layout = QHBoxLayout(top)
         top_layout.setContentsMargins(12, 8, 12, 8)
@@ -198,10 +232,15 @@ class MainWindow(QMainWindow):
         self.queue_view.run_requested.connect(self.run_queue)
         self.queue_view.remove_requested.connect(self.remove_queue_items)
         self.queue_view.clear_requested.connect(self.clear_finished_queue)
+        self.video_panel = VideoPanel()
+        self.video_panel.build_requested.connect(self.build_video)
+        self.video_panel.stop_requested.connect(self.stop_video)
 
         left = QSplitter(Qt.Orientation.Vertical)
         left.addWidget(self.project_panel)
         left.addWidget(self.settings_form)
+        left.addWidget(self.video_panel)
+        left.setSizes([300, 300, 230])
         right = QSplitter(Qt.Orientation.Vertical)
         right.addWidget(self.progress_panel)
         right.addWidget(self.log_view)
@@ -525,7 +564,119 @@ class MainWindow(QMainWindow):
         self.pause_button.setText("Resume" if paused else "Pause")
         self.stop_button.setEnabled(False)
         self.refresh_blender_status()
-        self._finish_queue_item(status, done, total)
+
+        if status != RUN_PAUSED:
+            self.notifier.notify(
+                "Render finished" if status == RUN_SUCCESS else "Render did not finish",
+                f"{Path(runner.job.blend_path).stem if runner.job else 'Job'}: {text}",
+                success=status == RUN_SUCCESS,
+            )
+        # Итог задачи придерживаем: очередь двинется дальше только после сборки видео,
+        # иначе выключение ПК могло бы случиться раньше, чем ffmpeg допишет файл.
+        self._pending_job_result = (status, done, total)
+        if status == RUN_SUCCESS and self.video_panel.auto_build() and runner.plans:
+            if self.build_video(runner.plans[0].output_path):
+                return
+        self._continue_after_job()
+
+    def _continue_after_job(self) -> None:
+        """Задача (и её видео, если было) завершена: двигаем очередь."""
+        result = self._pending_job_result
+        self._pending_job_result = None
+        if result is not None:
+            self._finish_queue_item(*result)
+
+    # --- видео ------------------------------------------------------------------------
+
+    def refresh_ffmpeg_status(self) -> None:
+        status = validate_ffmpeg_path(self.settings.ffmpeg_path)
+        self.video_panel.set_available(status.ok, status.reason)
+        if status.ok:
+            self.video_panel.set_status("Ready. Frames are rendered as a sequence, video is a separate step")
+
+    def current_video_preset(self) -> VideoPreset | None:
+        return find_video_preset(self.video_presets, self.video_panel.current_preset_name())
+
+    def build_video(self, output_path: str | None = None) -> bool:
+        """Собирает секвенцию в видео. ``output_path`` — папка кадров прошедшего рендера."""
+        if self.video_process.is_running():
+            return False
+        status = validate_ffmpeg_path(self.settings.ffmpeg_path)
+        if not status.ok:
+            self.video_panel.set_status(status.reason, "error")
+            return False
+        preset = self.current_video_preset()
+        if preset is None:
+            self.video_panel.set_status("No video preset selected", "error")
+            return False
+        source = output_path or (self.runner.plans[0].output_path if self.runner.plans else None)
+        if source is None:
+            job = self.project_panel.current_job()
+            source = job.output_template if job else None
+        if not source:
+            self.video_panel.set_status("Render a sequence first", "error")
+            return False
+        try:
+            sequence = find_sequence(source)
+        except FfmpegError as exc:
+            self.video_panel.set_status(str(exc), "error")
+            return False
+
+        fps = 25.0
+        scene = self.project.default_scene() if self.project else None
+        if scene is not None and scene.fps:
+            fps = scene.fps
+        output_file = default_output_file(sequence, preset)
+        argv = build_ffmpeg_argv(status.path, sequence, preset, output_file, fps=fps)
+        self.video_panel.set_running(True, sequence.frame_count)
+        self.video_panel.set_status(f"Encoding {sequence.frame_count} frame(s) to {output_file.name}…", "")
+        self.log_view.append_line(f"[BRM] ffmpeg: {' '.join(argv)}")
+        self.video_process.start(argv, total_frames=sequence.frame_count, output_file=output_file)
+        return True
+
+    def stop_video(self) -> None:
+        if self.video_process.is_running():
+            self.video_process.stop()
+
+    def _on_video_line(self, line: str) -> None:
+        if line.strip():
+            self.log_view.append_line(line)
+
+    def _on_video_progress(self, progress) -> None:
+        self.video_panel.update_progress(progress)
+
+    def _on_video_finished(self, exit_code: int, status: str) -> None:
+        process = self.video_process
+        text = describe_result(status, exit_code, process.progress, process.output_file)
+        self.video_panel.set_running(False)
+        self.video_panel.set_status(text, "ok" if status == VIDEO_SUCCESS else "error")
+        self.log_view.append_line(f"[BRM] {text}")
+        if status == VIDEO_SUCCESS and process.output_file is not None:
+            self.notifier.notify("Video ready", str(process.output_file))
+        else:
+            self.notifier.notify("Video assembly failed", text, success=False)
+        self._continue_after_job()
+
+    # --- выключение ПК ------------------------------------------------------------------
+
+    def maybe_shutdown(self) -> None:
+        """Автовыключение после очереди: сначала плашка с отменой, потом сам shutdown."""
+        if not self.settings.shutdown_after_queue or self._shutdown_pending:
+            return
+        result = schedule_shutdown(SHUTDOWN_DELAY_S)
+        if not result.ok:
+            self.log_view.append_line(f"[BRM] SKIP shutdown: {result.message}")
+            return
+        self._shutdown_pending = True
+        self.shutdown_banner.set_message(f"The PC will shut down in {SHUTDOWN_DELAY_S} s after the render queue")
+        self.shutdown_banner.show()
+        self.notifier.notify("Shutdown scheduled", f"The PC shuts down in {SHUTDOWN_DELAY_S} s. Open BRM to cancel")
+
+    def cancel_shutdown(self) -> None:
+        result = cancel_shutdown()
+        self._shutdown_pending = False
+        self.shutdown_banner.hide()
+        self.log_view.append_line(f"[BRM] {result.message or 'Shutdown cancel failed'}")
 
     # --- очередь ----------------------------------------------------------------------
 
@@ -561,6 +712,13 @@ class MainWindow(QMainWindow):
         self.queue_view.set_running(True)
         self._run_next_queue_item()
 
+    def _after_queue_finished(self) -> None:
+        """Очередь дошла до конца: уведомление и, если просили, выключение ПК."""
+        if self._queue_finished_pending:
+            self._queue_finished_pending = False
+            self.notifier.notify("Queue finished", "All queued jobs are done")
+        self.maybe_shutdown()
+
     def _run_next_queue_item(self) -> None:
         item = self.queue.next_pending()
         if item is None:
@@ -568,6 +726,8 @@ class MainWindow(QMainWindow):
             self._active_queue_item = None
             self._save_queue()
             self.log_view.set_status("Queue finished", "ok")
+            self._queue_finished_pending = True
+            self._after_queue_finished()
             return
         item.status = "running"
         item.message = ""
@@ -598,8 +758,10 @@ class MainWindow(QMainWindow):
             self._save_queue()
             self._run_next_queue_item()
         else:
-            self._queue_running = False
+            was_running, self._queue_running = self._queue_running, False
             self._save_queue()
+            if was_running:  # очередь оборвана Стопом: уведомление о конце не шлём
+                self._queue_finished_pending = False
 
     # --- фоновые задачи ------------------------------------------------------
 
@@ -628,7 +790,17 @@ class MainWindow(QMainWindow):
             self._store.save(self.settings)
             apply_theme(QApplication.instance(), self.settings.theme)
             self.project_panel.set_default_output_dir(self.settings.default_output_dir or "")
+            self.notifier.enabled = self.settings.notifications
+            self.refresh_ffmpeg_status()
             self.reprobe_blender()
+
+    def save_video_choice(self) -> None:
+        """Пресет кодека и автосборка запоминаются между запусками."""
+        name = self.video_panel.current_preset_name() or self.settings.last_video_preset
+        auto = self.video_panel.auto_build()
+        if name != self.settings.last_video_preset or auto != self.settings.auto_build_video:
+            self.settings = self.settings.model_copy(update={"last_video_preset": name, "auto_build_video": auto})
+            self._store.save(self.settings)
 
     def show_about(self) -> None:
         QMessageBox.about(
@@ -650,8 +822,12 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — имя из Qt
         self.cancel_tasks()
         self._queue_running = False
+        self.save_video_choice()
         if self.runner.is_running():
             self.runner.stop()
+        if self.video_process.is_running():
+            self.video_process.stop()
+        self.notifier.hide()
         super().closeEvent(event)
 
     def event(self, event: QEvent) -> bool:
