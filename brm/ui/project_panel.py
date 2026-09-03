@@ -29,10 +29,8 @@ from PySide6.QtWidgets import (
 from brm.core.frame_range import FrameRange, FrameRangeMode, describe_frames, resolve_frames
 from brm.core.models import DEFAULT_OUTPUT_TEMPLATE, RenderJob, expand_output_template
 from brm.core.project_probe import ProjectInfo, SceneInfo, file_version_str
+from brm.ui.theme import set_role
 
-_STYLE_WARNING = "color: #B85C00;"
-_STYLE_ERROR = "color: #C62828;"
-_STYLE_MUTED = "color: #666666;"
 _FRAME_MODES = [
     (FrameRangeMode.FROM_FILE, "From file"),
     (FrameRangeMode.MANUAL, "Manual range"),
@@ -83,10 +81,10 @@ class ProjectPanel(QGroupBox):
 
         self.summary_label = QLabel("No project loaded.", self)
         self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet(_STYLE_MUTED)
+        set_role(self.summary_label, "muted")
         self.warnings_label = QLabel(self)
         self.warnings_label.setWordWrap(True)
-        self.warnings_label.setStyleSheet(_STYLE_WARNING)
+        set_role(self.warnings_label, "warning")
         self.warnings_label.hide()
 
         # --- сцена ------------------------------------------------------------
@@ -147,7 +145,7 @@ class ProjectPanel(QGroupBox):
         output_row.addWidget(output_browse)
         self.output_preview = QLabel("—", self)
         self.output_preview.setWordWrap(True)
-        self.output_preview.setStyleSheet(_STYLE_MUTED)
+        set_role(self.output_preview, "muted")
 
         # --- компоновка ---------------------------------------------------------
         self.form = QWidget(self)
@@ -188,13 +186,13 @@ class ProjectPanel(QGroupBox):
     def set_loading(self, path: str) -> None:
         self.path_edit.setText(path)
         self.summary_label.setText(f"Reading {Path(path).name}…")
-        self.summary_label.setStyleSheet(_STYLE_MUTED)
+        set_role(self.summary_label, "muted")
         self.warnings_label.hide()
         self.form.setEnabled(False)
 
     def set_error(self, message: str) -> None:
         self.summary_label.setText(message)
-        self.summary_label.setStyleSheet(_STYLE_ERROR)
+        set_role(self.summary_label, "error")
         self.warnings_label.hide()
         self.form.setEnabled(False)
 
@@ -202,7 +200,7 @@ class ProjectPanel(QGroupBox):
         self._info = info
         self.path_edit.setText(info.file_path)
         self.summary_label.setText(self._summary_text(info))
-        self.summary_label.setStyleSheet("")
+        set_role(self.summary_label, "")
         if warnings:
             self.warnings_label.setText("\n".join(f"⚠ {w}" for w in warnings))
             self.warnings_label.show()
@@ -315,7 +313,7 @@ class ProjectPanel(QGroupBox):
         scene = self._scene
         if self._info is None:
             self.frames_label.setText("—")
-            self.frames_label.setStyleSheet("")
+            set_role(self.frames_label, "")
             return
         try:
             frames = resolve_frames(
@@ -325,13 +323,13 @@ class ProjectPanel(QGroupBox):
             )
         except ValueError as exc:
             self.frames_label.setText(str(exc))
-            self.frames_label.setStyleSheet(_STYLE_ERROR)
+            set_role(self.frames_label, "error")
             return
         text = describe_frames(frames)
         if scene is not None and scene.fps:
             text += f" · {len(frames) / scene.fps:.1f} s at {scene.fps:g} fps"
         self.frames_label.setText(text)
-        self.frames_label.setStyleSheet("")
+        set_role(self.frames_label, "")
 
     def _update_output_preview(self) -> None:
         if self._info is None or self._scene is None:

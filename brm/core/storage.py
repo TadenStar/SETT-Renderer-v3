@@ -39,7 +39,8 @@ class AppSettings(BaseModel):
     ffmpeg_path: str | None = None
     default_output_dir: str | None = None
     shutdown_after_queue: bool = False
-    theme: Literal["system", "light", "dark"] = "system"
+    # Тёмная по умолчанию: меньше светит ночью, когда идёт рендер.
+    theme: Literal["system", "light", "dark"] = "dark"
     # Последние открытые .blend, новые в начале.
     recent_projects: list[str] = Field(default_factory=list)
 

@@ -51,3 +51,7 @@ Legion 5 OLED, Intel i9, 32 GB RAM, RTX 5070 Laptop, одна машина.
   об ошибках, тексты причин из core, которые показываются пользователю.
 - Автор — Pavel Postnikov (`brm.__author__`). Подпись «Made by Pavel Postnikov»
   показывается в статус-баре и в окне About, не убирать.
+- Внешний вид — минимализм и тёмная тема по умолчанию (`ui/theme.py`): один акцент,
+  одна «главная» кнопка (`objectName="primaryButton"`), карточки без лишних рамок.
+  Цвета текста только через роли `set_role(label, "muted" | "warning" | "error" | "ok")`,
+  инлайновые `setStyleSheet` с цветами в панелях запрещены.

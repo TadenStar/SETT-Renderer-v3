@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -23,9 +24,9 @@ from PySide6.QtWidgets import (
 
 from brm.core.blender_locator import find_blender_candidates, validate_blender_path
 from brm.core.storage import AppSettings
+from brm.ui.theme import set_role
 
-_STYLE_OK = "color: #2E7D32;"
-_STYLE_ERROR = "color: #C62828;"
+_THEME_CHOICES = [("Dark", "dark"), ("Light", "light"), ("System", "system")]
 
 
 class SettingsDialog(QDialog):
@@ -59,11 +60,18 @@ class SettingsDialog(QDialog):
         browse_output = QPushButton("Browse…", self)
         browse_output.clicked.connect(self._browse_output)
 
+        self.theme_combo = QComboBox(self)
+        for title, value in _THEME_CHOICES:
+            self.theme_combo.addItem(title, value)
+        index = self.theme_combo.findData(settings.theme)
+        self.theme_combo.setCurrentIndex(index if index >= 0 else 0)
+
         form = QFormLayout()
         form.addRow("Blender (blender.exe):", self._row(self.blender_edit, browse_blender, autodetect))
         form.addRow("", self.blender_status)
         form.addRow("ffmpeg (optional):", self._row(self.ffmpeg_edit, browse_ffmpeg))
         form.addRow("Default output folder:", self._row(self.output_edit, browse_output))
+        form.addRow("Theme:", self.theme_combo)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
@@ -95,6 +103,7 @@ class SettingsDialog(QDialog):
                 "blender_path": _none_if_blank(self.blender_edit.text()),
                 "ffmpeg_path": _none_if_blank(self.ffmpeg_edit.text()),
                 "default_output_dir": _none_if_blank(self.output_edit.text()),
+                "theme": self.theme_combo.currentData(),
             }
         )
 
@@ -104,10 +113,10 @@ class SettingsDialog(QDialog):
         status = validate_blender_path(self.blender_edit.text())
         if status.ok:
             self.blender_status.setText("File found. Version will be checked on the first probe.")
-            self.blender_status.setStyleSheet(_STYLE_OK)
+            set_role(self.blender_status, "ok")
         else:
             self.blender_status.setText(status.reason)
-            self.blender_status.setStyleSheet(_STYLE_ERROR)
+            set_role(self.blender_status, "error")
         self.ok_button.setEnabled(status.ok)
 
     def _browse_blender(self) -> None:
@@ -126,7 +135,7 @@ class SettingsDialog(QDialog):
             self.blender_status.setText(
                 "No Blender found in the standard folders. Use Browse… to pick blender.exe."
             )
-            self.blender_status.setStyleSheet(_STYLE_ERROR)
+            set_role(self.blender_status, "error")
             return
         if len(candidates) == 1:
             self.blender_edit.setText(candidates[0])

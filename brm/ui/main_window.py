@@ -12,6 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -34,6 +35,7 @@ from brm.ui.project_panel import ProjectPanel, blend_paths_from_mime
 from brm.ui.queue_view import QueueView
 from brm.ui.settings_dialog import SettingsDialog
 from brm.ui.settings_form import SettingsForm
+from brm.ui.theme import apply_theme
 from brm.ui.workers import FunctionTask
 
 CREDIT_TEXT = f"Made by {__author__}"
@@ -133,7 +135,8 @@ class MainWindow(QMainWindow):
         self.blender_label = QLabel(top)
         top_layout.addWidget(self.blender_label, 1)
         self.render_button = QPushButton("Render", top)
-        self.render_button.setMinimumWidth(120)
+        self.render_button.setObjectName("primaryButton")  # единственная акцентная кнопка
+        self.render_button.setMinimumWidth(140)
         top_layout.addWidget(self.render_button, 0)
         root.addWidget(top)
 
@@ -320,6 +323,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings = dialog.result_settings()
             self._store.save(self.settings)
+            apply_theme(QApplication.instance(), self.settings.theme)
             self.project_panel.set_default_output_dir(self.settings.default_output_dir or "")
             self.reprobe_blender()
 

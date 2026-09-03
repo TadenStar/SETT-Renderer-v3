@@ -217,7 +217,10 @@ def test_settings_dialog_ok_follows_validation(qapp, fake_blender: Path) -> None
 
     dialog.output_edit.setText(r"D:\out")
     dialog.ffmpeg_edit.setText("   ")
+    assert dialog.theme_combo.currentData() == "dark"  # дефолт из AppSettings
+    dialog.theme_combo.setCurrentIndex(dialog.theme_combo.findData("light"))
     result = dialog.result_settings()
     assert result.blender_path == str(fake_blender)
     assert result.default_output_dir == r"D:\out"
     assert result.ffmpeg_path is None
+    assert result.theme == "light"
