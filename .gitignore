@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+*.spec
+
+# BRM
+*.log
+capabilities_*.json
+history.db
+queue.json
+settings.json
+tmp/
+
+# Blender
+*.blend1
+*.blend2
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
