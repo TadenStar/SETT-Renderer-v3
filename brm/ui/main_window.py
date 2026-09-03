@@ -40,13 +40,14 @@ from brm.core.ffmpeg import (
 )
 from brm.core.history import HistoryStore, read_frame_times
 from brm.core.job_runner import RUN_FAILED, RUN_PAUSED, RUN_STOPPED, RUN_SUCCESS, JobRunner
-from brm.core.log_parser import KIND_OTHER
+from brm.core.log_parser import KIND_OTHER, KIND_SAVED
 from brm.core.models import RenderJob
 from brm.core.preset_resolver import ResolvedPreset, compose_overrides, display_file_format, resolve_preset
+from brm.core.preview import describe_unpreviewable, is_previewable, latest_rendered_frame
 from brm.core.presets import Preset, find_preset, load_presets
 from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
 from brm.core.queue import QueueStore, RenderQueue
-from brm.core.render_plan import RenderPlan
+from brm.core.render_plan import RenderPlan, resolve_output_path
 from brm.core.render_stats import diagnose_failure, format_duration
 from brm.core.storage import AppSettings, SettingsStore, cache_dir, tmp_dir, with_recent_project
 from brm.core.system_actions import SHUTDOWN_DELAY_S, cancel_shutdown, schedule_shutdown
@@ -59,6 +60,7 @@ from brm.ui.progress_panel import ProgressPanel
 from brm.ui.project_panel import ProjectPanel, blend_paths_from_mime
 from brm.ui.queue_view import QueueView
 from brm.ui.onboarding_dialog import OnboardingDialog
+from brm.ui.preview_window import PreviewWindow
 from brm.ui.settings_dialog import SettingsDialog
 from brm.ui.settings_form import SettingsForm
 from brm.ui.theme import apply_theme
@@ -128,6 +130,7 @@ class MainWindow(QMainWindow):
 
         self.history_store = history_store or HistoryStore()
         self._history_dialog: HistoryDialog | None = None
+        self._preview_window: PreviewWindow | None = None
 
         self.presets: list[Preset] = load_presets()
         self.resolved_preset: ResolvedPreset | None = None
@@ -187,6 +190,11 @@ class MainWindow(QMainWindow):
         history_action.setShortcut(QKeySequence("Ctrl+H"))
         history_action.triggered.connect(self.show_history)
         view_menu.addAction(history_action)
+
+        preview_action = QAction("Last rendered &frame…", self)
+        preview_action.setShortcut(QKeySequence("Ctrl+P"))
+        preview_action.triggered.connect(self.show_preview)
+        view_menu.addAction(preview_action)
 
         help_menu = self.menuBar().addMenu("&Help")
         about_action = QAction("&About BRM", self)
@@ -533,6 +541,8 @@ class MainWindow(QMainWindow):
         self.log_view.append_line(line)
 
     def _on_render_event(self, event) -> None:
+        if event.kind == KIND_SAVED and event.saved_path:
+            self._preview_frame(event.saved_path)
         if event.kind != KIND_OTHER:
             self._refresh_progress()
 
@@ -613,6 +623,57 @@ class MainWindow(QMainWindow):
             return
         if self._history_dialog is not None:
             self.refresh_history()
+
+    # --- превью последнего кадра ---------------------------------------------------
+
+    def show_preview(self) -> None:
+        """Немодальное окно: во время рендера обновляется, иначе показывает последний кадр с диска."""
+        if self._preview_window is None:
+            self._preview_window = PreviewWindow(self)
+        window = self._preview_window
+        if window.current_path is None:
+            self._show_last_frame_from_disk()
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def _preview_frame(self, path: str) -> None:
+        """Кадр из строки Saved: — только если окно открыто и следит за рендером."""
+        window = self._preview_window
+        if window is None or window.isHidden() or not window.follows_render():
+            return
+        if is_previewable(path):
+            window.show_frame(path)
+        else:
+            window.show_message(describe_unpreviewable(path), "warning")
+
+    def _show_last_frame_from_disk(self) -> None:
+        """Открыли приложение после ночного рендера — показываем, чем всё кончилось."""
+        window = self._preview_window
+        if window is None:
+            return
+        output_path = None
+        if self.runner.plans:
+            output_path = self.runner.plans[0].output_path
+        else:
+            job = self.project_panel.current_job()
+            scene = None
+            if job is not None and self.project is not None:
+                scene = self.project.scene(job.scene) or self.project.default_scene()
+            if job is not None and scene is not None:
+                output_path = resolve_output_path(job, self.settings, scene.name)
+        if not output_path:
+            window.clear()
+            return
+        frame = latest_rendered_frame(output_path)
+        if frame is None:
+            unpreviewable = latest_rendered_frame(output_path, previewable_only=False)
+            if unpreviewable is not None:
+                window.show_message(describe_unpreviewable(unpreviewable), "warning")
+            else:
+                window.clear()
+            return
+        window.show_frame(frame, note="last frame on disk")
 
     def show_history(self) -> None:
         if self._history_dialog is None:
