@@ -104,3 +104,32 @@ def test_log_file_name_has_timestamp() -> None:
     from datetime import datetime
 
     assert log_file_name(datetime(2026, 9, 3, 14, 5, 9)) == "render_log_20260903-140509.txt"
+
+
+def test_log_paths_do_not_collide_within_one_second(caps: Capabilities, project: ProjectInfo, tmp_path: Path) -> None:
+    """Пачки и повтор после падения стартуют в одну секунду — лог первой неудачи не должен пропадать."""
+    job = RenderJob(blend_path=project.file_path)
+    settings = AppSettings(default_output_dir=str(tmp_path / "out"))
+    first = build_render_plan(job, caps, settings, project, tmp_dir=tmp_path, frames_override=[1])
+    first.log_path.parent.mkdir(parents=True, exist_ok=True)
+    first.log_path.write_text("log of the first attempt", encoding="utf-8")
+
+    second = build_render_plan(job, caps, settings, project, tmp_dir=tmp_path, frames_override=[2])
+    assert second.log_path != first.log_path
+    assert first.log_path.read_text(encoding="utf-8") == "log of the first attempt"
+    assert second.stats_path != first.stats_path
+    assert second.stats_path.suffix == ".json" and second.stats_path.name.startswith("render_stats_")
+
+
+def test_unique_log_path_falls_back_to_random_suffix(tmp_path: Path) -> None:
+    from datetime import datetime
+
+    from brm.core.render_plan import log_file_name, unique_log_path
+
+    now = datetime(2026, 9, 4, 12, 0, 0)
+    stem = log_file_name(now)[: -len(".txt")]
+    (tmp_path / f"{stem}.txt").write_text("x")
+    for attempt in range(2, 1000):
+        (tmp_path / f"{stem}_{attempt}.txt").write_text("x")
+    path = unique_log_path(tmp_path, now)
+    assert not path.exists() and path.name.startswith(stem)

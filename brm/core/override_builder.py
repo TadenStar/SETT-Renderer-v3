@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from brm.core.blender_process import script_path
 from brm.core.models import RenderJob
 
 TEMPLATE_NAME = "override_template.py"
+OVERRIDE_PREFIX = "_brm_override_"
 
 
 def build_override_settings(
@@ -57,6 +59,42 @@ def write_override_script(
     tmp = Path(tmp_dir)
     tmp.mkdir(parents=True, exist_ok=True)
     suffix = f"{job_id}_" if job_id else ""
-    path = tmp / f"_brm_override_{suffix}{uuid.uuid4().hex[:8]}.py"
+    path = tmp / f"{OVERRIDE_PREFIX}{suffix}{uuid.uuid4().hex[:8]}.py"
     path.write_text(render_override_script(settings), encoding="utf-8")
     return path
+
+
+def prune_override_scripts(
+    tmp_dir: str | os.PathLike[str], *, max_age_hours: float = 48.0, keep_last: int = 20
+) -> int:
+    """Убирает старые override-скрипты, возвращает число удалённых.
+
+    Скрипт не удаляется сразу после рендера намеренно: по нему видно, что именно
+    BRM сказал Blender'у. Но каждая пачка пишет свой файл, поэтому за месяцы
+    ночных рендеров их накапливаются тысячи — свежие оставляем, старые чистим.
+    Всё делается best-effort: занятый или чужой файл просто пропускаем.
+    """
+    directory = Path(tmp_dir)
+    if not directory.is_dir():
+        return 0
+    try:
+        scripts = [p for p in directory.glob(f"{OVERRIDE_PREFIX}*.py") if p.is_file()]
+    except OSError:
+        return 0
+    if len(scripts) <= keep_last:
+        return 0
+    try:
+        scripts.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return 0
+    deadline = time.time() - max_age_hours * 3600
+    removed = 0
+    for script in scripts[keep_last:]:  # самые свежие keep_last не трогаем в любом случае
+        try:
+            if script.stat().st_mtime >= deadline:
+                continue
+            script.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
