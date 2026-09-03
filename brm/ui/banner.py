@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QWidget
 
 
 class WarningBanner(QFrame):
-    """Кликабельная плашка «Blender не настроен → Открыть настройки»."""
+    """Кликабельная плашка «Blender is not configured → Open Settings»."""
 
     action_clicked = Signal()
 
@@ -21,7 +21,7 @@ class WarningBanner(QFrame):
         )
         self._label = QLabel(self)
         self._label.setWordWrap(True)
-        self._button = QPushButton("Открыть настройки", self)
+        self._button = QPushButton("Open Settings", self)
         self._button.clicked.connect(self.action_clicked)
 
         layout = QHBoxLayout(self)

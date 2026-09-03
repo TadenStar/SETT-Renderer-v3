@@ -72,10 +72,10 @@ class SettingsStore:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
-                raise ValueError("корень JSON — не объект")
+                raise ValueError("JSON root is not an object")
             return AppSettings.model_validate(data)
         except (OSError, ValueError, ValidationError) as exc:
-            log.warning("Не удалось прочитать %s: %s", self.path, exc)
+            log.warning("Failed to read %s: %s", self.path, exc)
             self._quarantine()
             return AppSettings()
 
@@ -93,6 +93,6 @@ class SettingsStore:
         target = self.path.with_name(f"{self.path.name}.broken-{stamp}")
         try:
             os.replace(self.path, target)
-            log.warning("Битый файл настроек сохранён как %s", target)
+            log.warning("Corrupt settings file kept as %s", target)
         except OSError as exc:
-            log.warning("Не удалось переименовать битый файл настроек: %s", exc)
+            log.warning("Could not rename corrupt settings file: %s", exc)

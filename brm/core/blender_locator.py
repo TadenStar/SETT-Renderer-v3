@@ -2,6 +2,7 @@
 
 Проверка версии через пробу (probe_caps) — этап M1. Здесь только файловая
 валидация: существует, это файл, это .exe, это именно blender.exe.
+Тексты причин показываются пользователю, поэтому они на английском.
 """
 from __future__ import annotations
 
@@ -30,23 +31,23 @@ def validate_blender_path(path: str | os.PathLike[str] | None) -> BlenderPathSta
     """Файловая проверка пути к blender.exe. Blender не запускается."""
     text = str(path).strip() if path is not None else ""
     if not text:
-        return BlenderPathStatus(False, "Не выбран blender.exe")
+        return BlenderPathStatus(False, "blender.exe is not set")
     p = Path(text)
     if not p.exists():
-        return BlenderPathStatus(False, f"Файл не найден: {p}", text)
+        return BlenderPathStatus(False, f"File not found: {p}", text)
     if p.is_dir():
-        return BlenderPathStatus(False, f"Это папка, а не файл: {p}", text)
+        return BlenderPathStatus(False, f"This is a folder, not a file: {p}", text)
     name = p.name.lower()
     if name == LAUNCHER_EXE_NAME:
         return BlenderPathStatus(
-            False, "Выбран blender-launcher.exe. Нужен blender.exe из той же папки", text
+            False, "blender-launcher.exe selected. Use blender.exe from the same folder", text
         )
     if p.suffix.lower() != ".exe":
-        return BlenderPathStatus(False, f"Это не исполняемый файл (.exe): {p.name}", text)
+        return BlenderPathStatus(False, f"Not an executable (.exe): {p.name}", text)
     if name != BLENDER_EXE_NAME:
-        return BlenderPathStatus(False, f"Ожидается blender.exe, выбран {p.name}", text)
+        return BlenderPathStatus(False, f"Expected blender.exe, got {p.name}", text)
     if not os.access(p, os.X_OK):
-        return BlenderPathStatus(False, f"Нет прав на запуск: {p}", text)
+        return BlenderPathStatus(False, f"No permission to execute: {p}", text)
     return BlenderPathStatus(True, "", text)
 
 

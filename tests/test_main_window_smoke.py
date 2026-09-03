@@ -11,7 +11,7 @@ from brm.ui.settings_dialog import SettingsDialog
 def test_without_blender_banner_visible_and_render_disabled(qapp, settings_path: Path) -> None:
     window = MainWindow(SettingsStore(settings_path))
     assert not window.banner.isHidden()
-    assert "Blender не настроен" in window.banner.message()
+    assert "Blender is not configured" in window.banner.message()
     assert not window.render_button.isEnabled()
     assert "blender.exe" in window.render_button.toolTip()
 
@@ -38,7 +38,12 @@ def test_stale_path_brings_banner_back(qapp, settings_path: Path, fake_blender: 
 
     assert not window.banner.isHidden()
     assert not window.render_button.isEnabled()
-    assert "не найден" in window.render_button.toolTip()
+    assert "not found" in window.render_button.toolTip()
+
+
+def test_author_credit_is_shown(qapp, settings_path: Path) -> None:
+    window = MainWindow(SettingsStore(settings_path))
+    assert window.credit_label.text() == "Made by Pavel Postnikov"
 
 
 def test_settings_dialog_ok_follows_validation(qapp, fake_blender: Path) -> None:

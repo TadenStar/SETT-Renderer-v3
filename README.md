@@ -20,3 +20,7 @@ python -m venv .venv
 ```
 
 Qt в тестах работает в offscreen-режиме, окна не открываются.
+
+---
+
+Made by Pavel Postnikov

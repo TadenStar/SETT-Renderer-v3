@@ -17,19 +17,19 @@ from brm.core.blender_locator import (
 def test_empty_path_is_not_ok(value) -> None:
     status = validate_blender_path(value)
     assert not status.ok
-    assert "Не выбран" in status.reason
+    assert "not set" in status.reason
 
 
 def test_missing_file(tmp_path: Path) -> None:
     status = validate_blender_path(tmp_path / "nope" / "blender.exe")
     assert not status.ok
-    assert "не найден" in status.reason
+    assert "not found" in status.reason
 
 
 def test_directory_instead_of_file(tmp_path: Path) -> None:
     status = validate_blender_path(tmp_path)
     assert not status.ok
-    assert "папка" in status.reason
+    assert "folder" in status.reason
 
 
 def test_launcher_is_rejected_with_hint(tmp_path: Path) -> None:
@@ -77,7 +77,7 @@ def test_no_exec_permission(fake_blender: Path, monkeypatch) -> None:
     monkeypatch.setattr(os, "access", lambda *args, **kwargs: False)
     status = validate_blender_path(fake_blender)
     assert not status.ok
-    assert "прав" in status.reason
+    assert "permission" in status.reason
 
 
 def test_find_candidates_sorted_newest_first(tmp_path: Path) -> None:
