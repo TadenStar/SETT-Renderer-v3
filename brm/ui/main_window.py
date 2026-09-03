@@ -1,6 +1,6 @@
-"""Главное окно. Только отображение: статус Blender и проекта спрашиваем у core.
+"""Главное окно. Только отображение: статус Blender, проект, задача и очередь — из core.
 
-Пробы выполняются в фоне (``ui.workers``), результаты приходят сигналами.
+Пробы выполняются в фоне (``ui.workers``), рендер ведёт ``core.job_runner``.
 """
 from __future__ import annotations
 
@@ -28,19 +28,15 @@ from PySide6.QtWidgets import (
 from brm import __author__, __version__
 from brm.core.blender_locator import validate_blender_path
 from brm.core.capabilities import Capabilities, get_capabilities, support_problem
-from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
-from brm.core.log_parser import KIND_OTHER, KIND_TIME
+from brm.core.job_runner import RUN_FAILED, RUN_PAUSED, RUN_STOPPED, RUN_SUCCESS, JobRunner
+from brm.core.log_parser import KIND_OTHER
+from brm.core.models import RenderJob
 from brm.core.preset_resolver import ResolvedPreset, compose_overrides, display_file_format, resolve_preset
 from brm.core.presets import Preset, find_preset, load_presets
-from brm.core.render_plan import RenderPlan, build_render_plan
-from brm.core.render_stats import (
-    RenderTracker,
-    diagnose_failure,
-    format_duration,
-    stats_dict,
-    write_stats,
-)
-from brm.core.runner import STATUS_FAILED, STATUS_STOPPED, STATUS_SUCCESS, RenderProcess
+from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
+from brm.core.queue import QueueStore, RenderQueue
+from brm.core.render_plan import RenderPlan
+from brm.core.render_stats import diagnose_failure, format_duration
 from brm.core.storage import SettingsStore, cache_dir, tmp_dir, with_recent_project
 from brm.ui.banner import WarningBanner
 from brm.ui.log_view import LogView
@@ -79,6 +75,7 @@ class MainWindow(QMainWindow):
         *,
         capabilities_loader: CapabilitiesLoader | None = None,
         project_loader: ProjectLoader | None = None,
+        queue_store: QueueStore | None = None,
     ) -> None:
         super().__init__(parent)
         self._store = store
@@ -93,17 +90,21 @@ class MainWindow(QMainWindow):
         self._caps_task: FunctionTask | None = None
         self._project_task: FunctionTask | None = None
 
-        self.render_process = RenderProcess(self)
-        self.render_process.line_received.connect(self._on_render_line)
-        self.render_process.finished.connect(self._on_render_finished)
-        self.current_plan: RenderPlan | None = None
-        self.tracker: RenderTracker | None = None
+        self.runner = JobRunner(self)
+        self.runner.started.connect(self._on_render_started)
+        self.runner.chunk_started.connect(self._on_chunk_started)
+        self.runner.line_received.connect(self._on_render_line)
+        self.runner.event_received.connect(self._on_render_event)
+        self.runner.finished.connect(self._on_render_finished)
         self._render_started_at = 0.0
-        self._pause_requested = False
-        self.paused_frames: list[int] | None = None
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._refresh_progress)
+
+        self.queue_store = queue_store or QueueStore()
+        self.queue: RenderQueue = self.queue_store.load()
+        self._queue_running = False
+        self._active_queue_item: str | None = None
 
         self.presets: list[Preset] = load_presets()
         self.resolved_preset: ResolvedPreset | None = None
@@ -119,6 +120,7 @@ class MainWindow(QMainWindow):
         self.settings_form.set_presets(self.presets, self.settings.last_preset)
         self.settings_form.preset_changed.connect(self._on_preset_changed)
         self.project_panel.scene_combo.currentTextChanged.connect(lambda _name: self.refresh_resolved_preset())
+        self.queue_view.set_items(self.queue.items)
         self.refresh_blender_status()
 
     # --- построение ----------------------------------------------------------
@@ -181,7 +183,7 @@ class MainWindow(QMainWindow):
         self.stop_button.setObjectName("dangerButton")
         self.stop_button.setMinimumWidth(100)
         self.stop_button.setEnabled(False)
-        self.stop_button.setToolTip("Stop after terminate; kill if Blender ignores it for 5 s")
+        self.stop_button.setToolTip("Stop after terminate; kill if Blender ignores it for 5 s. Stops the queue too")
         self.stop_button.clicked.connect(self.stop_render)
         top_layout.addWidget(self.stop_button, 0)
         root.addWidget(top)
@@ -192,6 +194,10 @@ class MainWindow(QMainWindow):
         self.progress_panel = ProgressPanel()
         self.log_view = LogView()
         self.queue_view = QueueView()
+        self.queue_view.add_requested.connect(self.add_current_to_queue)
+        self.queue_view.run_requested.connect(self.run_queue)
+        self.queue_view.remove_requested.connect(self.remove_queue_items)
+        self.queue_view.clear_requested.connect(self.clear_finished_queue)
 
         left = QSplitter(Qt.Orientation.Vertical)
         left.addWidget(self.project_panel)
@@ -200,7 +206,7 @@ class MainWindow(QMainWindow):
         right.addWidget(self.progress_panel)
         right.addWidget(self.log_view)
         right.addWidget(self.queue_view)
-        right.setSizes([230, 360, 150])
+        right.setSizes([230, 330, 180])
         main_split = QSplitter(Qt.Orientation.Horizontal)
         main_split.addWidget(left)
         main_split.addWidget(right)
@@ -273,32 +279,6 @@ class MainWindow(QMainWindow):
         self.refresh_blender_status()
         self.refresh_resolved_preset()
 
-    # --- пресеты -----------------------------------------------------------------
-
-    def current_preset(self) -> Preset | None:
-        return find_preset(self.presets, self.settings_form.current_preset_name())
-
-    def _on_preset_changed(self, name: str) -> None:
-        if name != self.settings.last_preset:
-            self.settings = self.settings.model_copy(update={"last_preset": name})
-            self._store.save(self.settings)
-        self.refresh_resolved_preset()
-
-    def refresh_resolved_preset(self) -> None:
-        """Пресет + capabilities + движок сцены → значения в форме. Логики нет, только вызов core."""
-        preset = self.current_preset()
-        scene = None
-        if self.project is not None:
-            scene = self.project.scene(self.project_panel.scene_combo.currentText()) or self.project.default_scene()
-        if preset is None or self.capabilities is None or scene is None:
-            self.resolved_preset = None
-            self.settings_form.set_engine(None)
-            self.settings_form.show_resolved(None)
-            return
-        self.resolved_preset = resolve_preset(preset, self.capabilities, scene.engine)
-        self.settings_form.set_engine(self.resolved_preset.engine)
-        self.settings_form.show_resolved(self.resolved_preset)
-
     def _on_capabilities_failed(self, task: FunctionTask, message: str) -> None:
         if task is not self._caps_task:
             return
@@ -326,13 +306,39 @@ class MainWindow(QMainWindow):
 
     def _show_blender_ok(self, caps: Capabilities) -> None:
         self.banner.hide()
-        self.render_button.setEnabled(not self.render_process.is_running())
+        self.render_button.setEnabled(not self.runner.is_running())
         self.render_button.setToolTip("Start rendering the current project")
         engines = ", ".join(caps.engines)
         self.blender_label.setText(
             f"Blender {caps.version_string} · Cycles device: {caps.best_cycles_device()} · {engines}"
         )
         self.blender_label.setToolTip(caps.blender_path)
+
+    # --- пресеты -----------------------------------------------------------------
+
+    def current_preset(self) -> Preset | None:
+        return find_preset(self.presets, self.settings_form.current_preset_name())
+
+    def _on_preset_changed(self, name: str) -> None:
+        if name != self.settings.last_preset:
+            self.settings = self.settings.model_copy(update={"last_preset": name})
+            self._store.save(self.settings)
+        self.refresh_resolved_preset()
+
+    def refresh_resolved_preset(self) -> None:
+        """Пресет + capabilities + движок сцены → значения в форме. Логики нет, только вызов core."""
+        preset = self.current_preset()
+        scene = None
+        if self.project is not None:
+            scene = self.project.scene(self.project_panel.scene_combo.currentText()) or self.project.default_scene()
+        if preset is None or self.capabilities is None or scene is None:
+            self.resolved_preset = None
+            self.settings_form.set_engine(None)
+            self.settings_form.show_resolved(None)
+            return
+        self.resolved_preset = resolve_preset(preset, self.capabilities, scene.engine)
+        self.settings_form.set_engine(self.resolved_preset.engine)
+        self.settings_form.show_resolved(self.resolved_preset)
 
     # --- проект ----------------------------------------------------------------
 
@@ -364,15 +370,11 @@ class MainWindow(QMainWindow):
         self._project_task = None
         self._end_task()
         self.project = info
-        self.paused_frames = None  # пауза относилась к прошлому проекту
-        if not self.render_process.is_running():
-            self.pause_button.setText("Pause")
-            self.pause_button.setEnabled(False)
         self.project_panel.set_project(info, project_warnings(info))
-        self.refresh_resolved_preset()
         self.settings = with_recent_project(self.settings, task.tag)
         self._store.save(self.settings)
         self.project_panel.set_recent(self.settings.recent_projects)
+        self.refresh_resolved_preset()
 
     def _on_project_failed(self, task: FunctionTask, message: str) -> None:
         if task is not self._project_task:
@@ -382,149 +384,222 @@ class MainWindow(QMainWindow):
         self.project = None
         self.project_panel.set_error(f"Could not read {Path(task.tag).name}: {message}")
 
+    # --- задача из панелей ------------------------------------------------------
+
+    def compose_job(self) -> RenderJob | None:
+        """Задача из панели проекта с настройками пресета и формы. None, если проект не загружен."""
+        job = self.project_panel.current_job()
+        if job is None or self.project is None:
+            return None
+        self.refresh_resolved_preset()
+        resolved = self.resolved_preset
+        if resolved is None:
+            return job
+        overrides = compose_overrides(resolved, self.settings_form.custom_values(), self.settings_form.untouched_paths())
+        chunk_size = job.chunk_size if job.chunk_size is not None else resolved.preset.chunk_size
+        return job.model_copy(
+            update={
+                "overrides": overrides,
+                "preset": resolved.preset.name,
+                "engine": resolved.engine if resolved.preset.engine else None,
+                "file_format": display_file_format(overrides, job.file_format),
+                "chunk_size": chunk_size,
+            }
+        )
+
     # --- рендер ------------------------------------------------------------------
 
-    def start_render(self, frames_override: list[int] | None = None) -> None:
-        if self.render_process.is_running():
+    def start_render(self) -> None:
+        if self.runner.is_running():
             return
         if self.capabilities is None:
             self.log_view.set_status("Configure a working Blender first", "error")
             return
-        job = self.project_panel.current_job()
+        job = self.compose_job()
         if job is None or self.project is None:
             self.log_view.set_status("Load a project first", "error")
             return
-        self.refresh_resolved_preset()
-        resolved = self.resolved_preset
-        if resolved is not None:
-            overrides = compose_overrides(
-                resolved, self.settings_form.custom_values(), self.settings_form.untouched_paths()
-            )
-            job = job.model_copy(
-                update={
-                    "overrides": overrides,
-                    "preset": resolved.preset.name,
-                    "engine": resolved.engine if resolved.preset.engine else None,
-                    "file_format": display_file_format(overrides, job.file_format),
-                }
-            )
+        self._active_queue_item = None
+        self._launch(job, self.project)
+
+    def _launch(self, job: RenderJob, project: ProjectInfo) -> bool:
+        assert self.capabilities is not None
         try:
-            plan = build_render_plan(
-                job, self.capabilities, self.settings, self.project, tmp_dir=tmp_dir(), frames_override=frames_override
-            )
-        except ValueError as exc:
+            self.runner.start(job, self.capabilities, self.settings, project, tmp_dir=tmp_dir())
+        except (ValueError, RuntimeError) as exc:
             self.log_view.set_status(str(exc), "error")
-            return
-        self.current_plan = plan
-        self.tracker = RenderTracker(plan.frames)
-        self._pause_requested = False
-        self.paused_frames = None
+            return False
+        return True
+
+    def _on_render_started(self) -> None:
+        total = self.runner.frames_expected()
         self.log_view.clear()
-        self.log_view.set_command(plan.command_line)
-        self.log_view.append_line(f"[BRM] output: {plan.output_path}")
-        self.log_view.append_line(f"[BRM] log file: {plan.log_path}")
-        if resolved is not None:
-            self.log_view.append_line(f"[BRM] preset: {resolved.preset.name}, {len(job.overrides)} setting(s)")
-            for skipped in resolved.skipped:
-                self.log_view.append_line(f"[BRM] SKIP preset {skipped.path}: {skipped.reason}")
-        self.log_view.set_status(f"Rendering {len(plan.frames)} frame(s)…", "muted")
-        self.progress_panel.set_running(len(plan.frames))
+        self.log_view.set_status(f"Rendering {total} frame(s)…", "muted")
+        self.progress_panel.set_running(total)
         self._render_started_at = time.monotonic()
         self.render_button.setEnabled(False)
         self.pause_button.setText("Pause")
         self.pause_button.setEnabled(True)
         self.stop_button.setEnabled(True)
         self._elapsed_timer.start()
-        self.render_process.start(plan)
+
+    def _on_chunk_started(self, plan: RenderPlan) -> None:
+        self.log_view.set_command(plan.command_line)
+        if len(self.runner.plans) == 1:
+            self.log_view.append_line(f"[BRM] output: {plan.output_path}")
+            if plan.job.preset:
+                self.log_view.append_line(f"[BRM] preset: {plan.job.preset}, {len(plan.job.overrides)} setting(s)")
+            resolved = self.resolved_preset
+            if resolved is not None and self._active_queue_item is None:
+                for skipped in resolved.skipped:
+                    self.log_view.append_line(f"[BRM] SKIP preset {skipped.path}: {skipped.reason}")
+        self.log_view.append_line(f"[BRM] log file: {plan.log_path}")
 
     def stop_render(self) -> None:
-        if self.render_process.is_running():
-            self._pause_requested = False
+        self._queue_running = False
+        if self.runner.is_running():
             self.log_view.set_status("Stopping…", "warning")
-            self.render_process.stop()
+            self.runner.stop()
 
     def pause_or_resume(self) -> None:
-        """Пауза после текущего кадра; Resume дорендеривает оставшиеся кадры новым процессом."""
-        if self.render_process.is_running():
-            self._pause_requested = True
+        """Пауза после текущего кадра; Resume дорендеривает оставшиеся кадры."""
+        if self.runner.is_running():
+            self.runner.pause()
             self.pause_button.setEnabled(False)
             self.log_view.set_status("Pausing after the current frame…", "warning")
             self.progress_panel.status_label.setText("Pausing after the current frame…")
-        elif self.paused_frames:
-            self.start_render(frames_override=self.paused_frames)
+        elif self.runner.is_paused():
+            self.runner.resume()
+            self.render_button.setEnabled(False)
+            self.pause_button.setText("Pause")
+            self.pause_button.setEnabled(True)
+            self.stop_button.setEnabled(True)
+            self._elapsed_timer.start()
 
     def _on_render_line(self, line: str) -> None:
         self.log_view.append_line(line)
-        if self.tracker is None:
-            return
-        event = self.tracker.feed(line)
-        if event.kind == KIND_OTHER:
-            return
-        if event.kind == KIND_TIME and self._pause_requested and self.render_process.is_running():
-            # Кадр сохранён и его время известно — самый чистый момент для остановки.
-            self.render_process.stop(force=True)
-        self._refresh_progress()
+
+    def _on_render_event(self, event) -> None:
+        if event.kind != KIND_OTHER:
+            self._refresh_progress()
+
+    def _chunk_note(self) -> str:
+        if len(self.runner.chunks) > 1:
+            return f"chunk {min(self.runner.chunk_index + 1, len(self.runner.chunks))} / {len(self.runner.chunks)}"
+        return ""
 
     def _refresh_progress(self) -> None:
-        if self.tracker is None:
+        if self.runner.tracker is None:
             return
-        self.progress_panel.update_progress(self.tracker.progress, time.monotonic() - self._render_started_at)
+        elapsed = time.monotonic() - self._render_started_at
+        self.progress_panel.update_progress(self.runner.tracker.progress, elapsed, note=self._chunk_note())
 
-    def _on_render_finished(self, exit_code: int, status: str) -> None:
+    def _on_render_finished(self, status: str) -> None:
         self._elapsed_timer.stop()
         elapsed = time.monotonic() - self._render_started_at
-        plan = self.current_plan
-        progress = self.tracker.progress if self.tracker is not None else None
+        runner = self.runner
+        progress = runner.tracker.progress if runner.tracker is not None else None
         done = progress.frames_done_count if progress else 0
-        total = len(plan.frames) if plan else 0
-        remaining = progress.remaining_frames() if progress else []
-        paused = status == STATUS_STOPPED and self._pause_requested and bool(remaining)
+        total = progress.frames_total if progress else 0
+        skipped = len(runner.skipped_existing)
+        prefix = f"{skipped} on disk, " if skipped else ""
         hint = None
-        if paused:
-            self.paused_frames = remaining
-            text, role = f"Paused after {done} / {total} frame(s), {len(remaining)} left. Press Resume to continue", "warning"
-        elif status == STATUS_SUCCESS or (status == STATUS_STOPPED and self._pause_requested and not remaining):
-            # Пауза пришла, когда кадры уже кончились: это обычное завершение.
-            text, role = f"Finished: {done} / {total} frame(s) in {format_duration(elapsed)}", "ok"
-        elif status == STATUS_STOPPED:
+        if status == RUN_PAUSED:
+            text, role = f"Paused after {done} / {total} frame(s), {len(runner.paused_frames)} left. Press Resume", "warning"
+        elif status == RUN_SUCCESS:
+            text, role = f"Finished: {prefix}{done} / {total} frame(s) rendered in {format_duration(elapsed)}", "ok"
+        elif status == RUN_STOPPED:
             text, role = f"Stopped by user after {done} / {total} frame(s), {format_duration(elapsed)}", "warning"
-        elif status == STATUS_FAILED:
-            text, role = f"Failed after {done} / {total} frame(s): exit code {exit_code}, {format_duration(elapsed)}", "error"
-            hint = diagnose_failure(progress.errors if progress else [], exit_code, status)
         else:
-            text, role = "Blender crashed or could not start. See the log", "error"
-            hint = diagnose_failure(progress.errors if progress else [], exit_code, status)
+            text, role = f"Failed after {done} / {total} frame(s): {runner.message}, {format_duration(elapsed)}", "error"
+            hint = diagnose_failure(progress.errors if progress else [], runner.exit_code, RUN_FAILED)
+        if runner.retry_notes:
+            text += f" · retried with {runner.retry_notes[-1]}"
         self.log_view.set_status(text, role)
         self._refresh_progress()
         self.progress_panel.set_finished(text, role, hint)
-        if plan is not None:
-            self.log_view.append_line(f"[BRM] finished: status={status} exit_code={exit_code} log={plan.log_path}")
-            if progress is not None:
-                self._write_render_stats(plan, progress, status, exit_code, elapsed)
-        self._pause_requested = False
-        self.pause_button.setEnabled(bool(paused and self.paused_frames))
-        self.pause_button.setText("Resume" if paused and self.paused_frames else "Pause")
+        if runner.plans:
+            self.log_view.append_line(f"[BRM] finished: status={status} · {runner.message} · stats={runner.plans[0].stats_path}")
+        paused = runner.is_paused()
+        self.pause_button.setEnabled(paused)
+        self.pause_button.setText("Resume" if paused else "Pause")
         self.stop_button.setEnabled(False)
         self.refresh_blender_status()
+        self._finish_queue_item(status, done, total)
 
-    def _write_render_stats(self, plan: RenderPlan, progress, status: str, exit_code: int, elapsed: float) -> None:
-        # Данные для графика времени кадров и истории (раздел 4.9 спеки).
-        data = stats_dict(
-            progress,
-            status=status,
-            exit_code=exit_code,
-            duration_s=elapsed,
-            extra={
-                "blend_path": plan.job.blend_path,
-                "scene": plan.scene.name if plan.scene else plan.job.scene,
-                "log_file": plan.log_path.name,
-                "output_path": plan.output_path,
-            },
-        )
-        try:
-            write_stats(plan.stats_path, data)
-        except OSError as exc:
-            self.log_view.append_line(f"[BRM] SKIP stats file: {exc}")
+    # --- очередь ----------------------------------------------------------------------
+
+    def _save_queue(self) -> None:
+        self.queue_store.save(self.queue)
+        self.queue_view.set_items(self.queue.items)
+        self.queue_view.set_running(self._queue_running)
+
+    def add_current_to_queue(self) -> None:
+        job = self.compose_job()
+        if job is None or self.project is None:
+            self.log_view.set_status("Load a project first", "error")
+            return
+        item = self.queue.add(job, self.project)
+        self._save_queue()
+        self.log_view.set_status(f"Queued {item.title}: {job.preset or 'file settings'}", "muted")
+
+    def remove_queue_items(self, item_ids: list[str]) -> None:
+        if self.queue.remove(item_ids):
+            self._save_queue()
+
+    def clear_finished_queue(self) -> None:
+        if self.queue.clear_finished():
+            self._save_queue()
+
+    def run_queue(self) -> None:
+        if self.runner.is_running() or self._queue_running:
+            return
+        if self.capabilities is None:
+            self.log_view.set_status("Configure a working Blender first", "error")
+            return
+        self._queue_running = True
+        self.queue_view.set_running(True)
+        self._run_next_queue_item()
+
+    def _run_next_queue_item(self) -> None:
+        item = self.queue.next_pending()
+        if item is None:
+            self._queue_running = False
+            self._active_queue_item = None
+            self._save_queue()
+            self.log_view.set_status("Queue finished", "ok")
+            return
+        item.status = "running"
+        item.message = ""
+        self._active_queue_item = item.id
+        self._save_queue()
+        if not self._launch(item.job, item.project):
+            item.status = "failed"
+            item.message = self.log_view.status_label.text()
+            self._save_queue()
+            self._run_next_queue_item()
+
+    def _finish_queue_item(self, status: str, done: int, total: int) -> None:
+        item_id = self._active_queue_item
+        if item_id is None:
+            return
+        item = self.queue.find(item_id)
+        if item is not None:
+            item.status = {RUN_SUCCESS: "done", RUN_PAUSED: "paused", RUN_STOPPED: "stopped"}.get(status, "failed")
+            item.message = self.runner.message
+            item.frames_done, item.frames_total = done, total
+            if status != RUN_PAUSED:
+                item.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        if status == RUN_PAUSED:
+            self._save_queue()
+            return
+        self._active_queue_item = None
+        if self._queue_running and status in (RUN_SUCCESS, RUN_FAILED):
+            self._save_queue()
+            self._run_next_queue_item()
+        else:
+            self._queue_running = False
+            self._save_queue()
 
     # --- фоновые задачи ------------------------------------------------------
 
@@ -574,8 +649,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 — имя из Qt
         self.cancel_tasks()
-        if self.render_process.is_running():
-            self.render_process.stop()
+        self._queue_running = False
+        if self.runner.is_running():
+            self.runner.stop()
         super().closeEvent(event)
 
     def event(self, event: QEvent) -> bool:

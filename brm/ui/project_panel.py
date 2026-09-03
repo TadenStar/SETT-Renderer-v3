@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -147,6 +148,31 @@ class ProjectPanel(QGroupBox):
         self.output_preview.setWordWrap(True)
         set_role(self.output_preview, "muted")
 
+        # --- защита от падений (M5) --------------------------------------------------
+        self.resume_check = QCheckBox("Skip frames already on disk", self)
+        self.resume_check.setChecked(True)
+        self.resume_check.setToolTip("Resume: only frames missing from the output folder are rendered")
+        self.min_kb_spin = QSpinBox(self)
+        self.min_kb_spin.setRange(0, 1_000_000)
+        self.min_kb_spin.setSuffix(" KB")
+        self.min_kb_spin.setSpecialValueText("any size")
+        self.min_kb_spin.setToolTip("Re-render existing frames smaller than this: catches empty or broken files")
+        self.chunk_spin = QSpinBox(self)
+        self.chunk_spin.setRange(0, 100_000)
+        self.chunk_spin.setSpecialValueText("preset")
+        self.chunk_spin.setToolTip(
+            "Frames per Blender process. Memory leaks do not pile up and a crash costs one chunk, "
+            "at the price of rebuilding the BVH per chunk. 'preset' takes the value from the preset"
+        )
+        safety_row = QHBoxLayout()
+        safety_row.addWidget(self.resume_check)
+        safety_row.addWidget(QLabel("re-render below", self))
+        safety_row.addWidget(self.min_kb_spin)
+        safety_row.addSpacing(12)
+        safety_row.addWidget(QLabel("Chunk", self))
+        safety_row.addWidget(self.chunk_spin)
+        safety_row.addStretch(1)
+
         # --- компоновка ---------------------------------------------------------
         self.form = QWidget(self)
         form = QFormLayout(self.form)
@@ -158,6 +184,7 @@ class ProjectPanel(QGroupBox):
         form.addRow("", self.frames_label)
         form.addRow("Output:", output_row)
         form.addRow("", self.output_preview)
+        form.addRow("Safety:", safety_row)
         self.form.setEnabled(False)
 
         layout = QVBoxLayout(self)
@@ -227,6 +254,9 @@ class ProjectPanel(QGroupBox):
             view_layer=self.view_layer_combo.currentText() or None,
             frame_range=self.current_frame_range(),
             output_template=self.output_edit.text().strip() or DEFAULT_OUTPUT_TEMPLATE,
+            resume=self.resume_check.isChecked(),
+            min_frame_kb=self.min_kb_spin.value(),
+            chunk_size=self.chunk_spin.value() or None,
         )
 
     def current_frame_range(self) -> FrameRange:

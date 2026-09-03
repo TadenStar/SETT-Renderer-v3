@@ -37,6 +37,11 @@ class RenderJob(BaseModel):
     # Присваивания RNA-свойств для override.py: «scene.cycles.samples» → 128.
     # Пресеты M4 раскладываются сюда же.
     overrides: dict[str, Any] = Field(default_factory=dict)
+    # Защита от падений (M5): пропускать готовые кадры, перерендеривать кадры
+    # меньше порога, бить задачу на пачки по N кадров (None — из пресета, 0 — выкл).
+    resume: bool = True
+    min_frame_kb: int = 0
+    chunk_size: int | None = None
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     @property
