@@ -1,0 +1,80 @@
+{
+ "probe_version": 1,
+ "file_path": "C:/tmp/Тест default.blend",
+ "saved_with_version": [
+  5,
+  0,
+  119
+ ],
+ "blender_version": [
+  5,
+  0,
+  1
+ ],
+ "blender_version_file": [
+  5,
+  0,
+  119
+ ],
+ "active_scene": "Scene",
+ "scenes": [
+  {
+   "name": "Scene",
+   "engine": "BLENDER_EEVEE",
+   "frame_start": 1,
+   "frame_end": 250,
+   "frame_step": 1,
+   "frame_current": 1,
+   "fps": 24.0,
+   "resolution_x": 1920,
+   "resolution_y": 1080,
+   "resolution_percentage": 100,
+   "output_path": "/tmp\\",
+   "file_format": "PNG",
+   "color_mode": "RGBA",
+   "color_depth": "8",
+   "active_camera": "Camera",
+   "cameras": [
+    "Camera"
+   ],
+   "view_layers": [
+    {
+     "name": "ViewLayer",
+     "use": true
+    }
+   ],
+   "markers": [],
+   "use_compositing": true,
+   "has_compositor_tree": false,
+   "use_sequencer": true,
+   "sequencer_strips": 0,
+   "render_summary": {
+    "cycles.samples": 4096,
+    "cycles.adaptive_threshold": 0.009999999776482582,
+    "cycles.use_adaptive_sampling": true,
+    "cycles.use_denoising": true,
+    "cycles.device": "CPU",
+    "eevee.taa_render_samples": 64,
+    "render.use_persistent_data": false,
+    "render.use_simplify": false,
+    "render.use_motion_blur": false
+   }
+  }
+ ],
+ "enabled_addons": [
+  "RM_FAST_Keyframe_JSON_Geometry_v3_0_1",
+  "bl_ext.user_default.blenderkit",
+  "bl_ext.user_default.flip_fluids_addon",
+  "bl_pkg",
+  "cycles",
+  "io_anim_bvh",
+  "io_curve_svg",
+  "io_mesh_uv_layout",
+  "io_scene_fbx",
+  "io_scene_gltf2",
+  "node_wrangler",
+  "pose_library"
+ ],
+ "missing_libraries": [],
+ "log": []
+}
