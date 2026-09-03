@@ -60,7 +60,7 @@ class ProgressPanel(QGroupBox):
         self.samples_bar.setValue(0)
         self.sparkline.clear()
 
-    def update_progress(self, progress: RenderProgress, elapsed_s: float) -> None:
+    def update_progress(self, progress: RenderProgress, elapsed_s: float, note: str = "") -> None:
         total = max(progress.frames_total, 1)
         self.frames_bar.setRange(0, total)
         self.frames_bar.setValue(min(progress.frames_done_count, total))
@@ -76,6 +76,8 @@ class ProgressPanel(QGroupBox):
             parts.append(f"rendering {progress.current_frame}")
         if progress.samples_total:
             parts.append(f"sample {progress.sample or 0} / {progress.samples_total}")
+        if note:
+            parts.append(note)
         self.status_label.setText(" · ".join(parts))
         set_role(self.status_label, "")
 

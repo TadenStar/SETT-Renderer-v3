@@ -12,6 +12,7 @@ from brm.core.blender_process import run_blender
 from brm.core.capabilities import get_capabilities, run_probe, support_problem
 from brm.core.frame_range import FrameRange, FrameRangeMode
 from brm.core.models import RenderJob
+from brm.core.output_scan import scan_output
 from brm.core.preset_resolver import compose_overrides, resolve_preset
 from brm.core.presets import load_presets
 from brm.core.project_probe import probe_project, project_warnings
@@ -104,6 +105,39 @@ def test_render_one_frame_with_override(real_blender: str, tiny_blend: Path, tmp
     png = plan.output_dir / "0001.png"
     assert png.is_file() and png.stat().st_size > 0
     assert "Saved:" in result.stdout
+
+
+def test_resume_after_a_killed_render(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Критерий M5: половина кадров на диске, приложение дорендеривает остаток само."""
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+    job = RenderJob(
+        blend_path=str(tiny_blend),
+        frame_range=FrameRange(mode=FrameRangeMode.MANUAL, start=1, end=6),
+        overrides={"scene.render.resolution_x": 64, "scene.render.resolution_y": 64, "scene.eevee.taa_render_samples": 4},
+        resume=True,
+        min_frame_kb=1,
+    )
+    settings = AppSettings(default_output_dir=str(tmp_path / "out"))
+
+    # Первый прогон: только кадры 1..3, как будто остальные не успели.
+    first = build_render_plan(job, caps, settings, info, tmp_dir=tmp_path / "tmp", frames_override=[1, 2, 3])
+    assert run_blender(first.argv[0], first.argv[1:], timeout=600).ok
+    on_disk = sorted(p.name for p in first.output_dir.glob("*.png"))
+    assert on_disk == ["0001.png", "0002.png", "0003.png"]
+    # Кадр 2 «битый»: пустой файл, resume обязан его перерендерить.
+    (first.output_dir / "0002.png").write_bytes(b"")
+
+    scan = scan_output(first.output_path, [1, 2, 3, 4, 5, 6], extensions=["png"])
+    missing = scan.missing([1, 2, 3, 4, 5, 6], min_size_bytes=1024)
+    assert missing == [2, 4, 5, 6]
+
+    second = build_render_plan(job, caps, settings, info, tmp_dir=tmp_path / "tmp", frames_override=missing)
+    assert second.argv[second.argv.index("--render-frame") + 1] == "2,4..6"
+    result = run_blender(second.argv[0], second.argv[1:], timeout=600)
+    assert result.ok, result.tail(40)
+    assert sorted(p.name for p in second.output_dir.glob("*.png")) == [f"{f:04d}.png" for f in range(1, 7)]
+    assert all(p.stat().st_size > 1024 for p in second.output_dir.glob("*.png"))
 
 
 def test_presets_draft_and_final_change_the_render(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
