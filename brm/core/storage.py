@@ -1,7 +1,8 @@
-"""Хранение настроек приложения.
+"""Хранение настроек приложения и пути к папкам данных.
 
 Файл: ``%APPDATA%/BRM/settings.json``. Читается при старте, пишется при
-изменении из диалога настроек. Модуль не зависит от Qt.
+изменении из диалога настроек. Кэш и временные файлы — в ``%LOCALAPPDATA%/BRM``.
+Модуль не зависит от Qt.
 """
 from __future__ import annotations
 
@@ -12,12 +13,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
 APP_DIR_NAME = "BRM"
 SETTINGS_FILE_NAME = "settings.json"
+RECENT_PROJECTS_LIMIT = 10
 
 
 class AppSettings(BaseModel):
@@ -37,15 +39,43 @@ class AppSettings(BaseModel):
     ffmpeg_path: str | None = None
     default_output_dir: str | None = None
     shutdown_after_queue: bool = False
-    theme: Literal["system", "light", "dark"] = "system"
+    # Тёмная по умолчанию: меньше светит ночью, когда идёт рендер.
+    theme: Literal["system", "light", "dark"] = "dark"
+    # Последние открытые .blend, новые в начале.
+    recent_projects: list[str] = Field(default_factory=list)
+
+
+def with_recent_project(
+    settings: AppSettings, path: str, limit: int = RECENT_PROJECTS_LIMIT
+) -> AppSettings:
+    """Копия настроек, где ``path`` стоит первым в списке последних проектов."""
+    normalized = os.path.normpath(path)
+    rest = [p for p in settings.recent_projects if os.path.normcase(p) != os.path.normcase(normalized)]
+    return settings.model_copy(update={"recent_projects": [normalized, *rest][:limit]})
 
 
 def app_data_dir() -> Path:
-    """Папка данных приложения: ``%APPDATA%/BRM``."""
+    """Папка настроек: ``%APPDATA%/BRM``."""
     base = os.environ.get("APPDATA")
     if not base:
         base = str(Path.home() / "AppData" / "Roaming")
     return Path(base) / APP_DIR_NAME
+
+
+def app_local_dir() -> Path:
+    """Папка кэша и временных файлов: ``%LOCALAPPDATA%/BRM``."""
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        base = str(Path.home() / "AppData" / "Local")
+    return Path(base) / APP_DIR_NAME
+
+
+def cache_dir() -> Path:
+    return app_local_dir() / "cache"
+
+
+def tmp_dir() -> Path:
+    return app_local_dir() / "tmp"
 
 
 def default_settings_path() -> Path:

@@ -11,6 +11,7 @@ dist/
 # BRM
 *.log
 capabilities_*.json
+!tests/fixtures/capabilities_*.json
 history.db
 queue.json
 settings.json

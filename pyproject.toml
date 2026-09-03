@@ -2,3 +2,6 @@
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+markers = [
+    "blender: integration tests that launch a real blender.exe (skipped when none is found)",
+]
