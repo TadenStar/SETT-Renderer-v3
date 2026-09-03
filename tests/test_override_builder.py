@@ -171,3 +171,62 @@ def test_write_override_script_is_valid_python(tmp_path: Path) -> None:
     result = runpy.run_path(str(path))  # bpy нет — main() не запускается, файл просто исполняется
     assert result["SETTINGS"]["scene"] == "S"
     assert result["bpy"] is None
+
+
+def test_prune_override_scripts_keeps_recent_and_removes_stale(tmp_path: Path) -> None:
+    """Скрипты копятся по одному на пачку — старые чистим, свежие оставляем для разбора."""
+    import os
+    import time
+
+    from brm.core.override_builder import prune_override_scripts
+
+    old_time = time.time() - 72 * 3600
+    stale = []
+    for index in range(30):
+        path = write_override_script({"scene": "S", "assignments": []}, tmp_path, f"job{index:02d}")
+        os.utime(path, (old_time, old_time))
+        stale.append(path)
+    fresh = [write_override_script({"scene": "S", "assignments": []}, tmp_path, f"new{index}") for index in range(3)]
+
+    removed = prune_override_scripts(tmp_path, max_age_hours=48, keep_last=20)
+    assert removed == 13  # 33 всего, 20 самых свежих неприкосновенны
+    assert all(path.is_file() for path in fresh)
+    assert sum(1 for path in tmp_path.glob("_brm_override_*.py")) == 20
+
+
+def test_prune_keeps_everything_when_few_files(tmp_path: Path) -> None:
+    import os
+    import time
+
+    from brm.core.override_builder import prune_override_scripts
+
+    old_time = time.time() - 500 * 3600
+    for index in range(5):
+        path = write_override_script({"scene": "S", "assignments": []}, tmp_path, f"job{index}")
+        os.utime(path, (old_time, old_time))
+    assert prune_override_scripts(tmp_path, max_age_hours=1, keep_last=20) == 0
+    assert sum(1 for path in tmp_path.glob("_brm_override_*.py")) == 5
+
+
+def test_prune_touches_nothing_else(tmp_path: Path) -> None:
+    import os
+    import time
+
+    from brm.core.override_builder import prune_override_scripts
+
+    old_time = time.time() - 500 * 3600
+    for index in range(25):
+        path = write_override_script({"scene": "S", "assignments": []}, tmp_path, f"job{index:02d}")
+        os.utime(path, (old_time, old_time))
+    stranger = tmp_path / "_brm_caps_abc.json"
+    stranger.write_text("{}", encoding="utf-8")
+    os.utime(stranger, (old_time, old_time))
+
+    prune_override_scripts(tmp_path, max_age_hours=1, keep_last=20)
+    assert stranger.is_file()  # чужие файлы во временной папке не наши
+
+
+def test_prune_on_missing_directory_is_safe(tmp_path: Path) -> None:
+    from brm.core.override_builder import prune_override_scripts
+
+    assert prune_override_scripts(tmp_path / "nope") == 0

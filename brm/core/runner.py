@@ -91,8 +91,11 @@ class RenderProcess(QObject):
         QTimer.singleShot(self._kill_delay_ms, self._kill_if_running)
 
     def _kill_if_running(self) -> None:
-        if self.is_running():
-            self._proc.kill()
+        try:
+            if self.is_running():
+                self._proc.kill()
+        except RuntimeError:
+            pass  # процесс успели отпустить (deleteLater) — гасить нечего
 
     # --- вывод -------------------------------------------------------------------------
 

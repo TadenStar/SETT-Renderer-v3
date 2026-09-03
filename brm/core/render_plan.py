@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,25 @@ class RenderPlan:
 def log_file_name(now: datetime | None = None) -> str:
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
     return f"render_log_{stamp}.txt"
+
+
+def unique_log_path(output_dir: str | os.PathLike[str], now: datetime | None = None) -> Path:
+    """Свободное имя лога в папке вывода.
+
+    Имя с точностью до секунды: две пачки или повтор после падения стартуют
+    в одну секунду и раньше затирали лог друг друга (``RenderProcess`` открывает
+    файл на запись), а именно лог первой неудачи и нужен для разбора.
+    """
+    directory = Path(output_dir)
+    candidate = directory / log_file_name(now)
+    if not candidate.exists():
+        return candidate
+    stem = candidate.stem
+    for attempt in range(2, 1000):
+        candidate = directory / f"{stem}_{attempt}.txt"
+        if not candidate.exists():
+            return candidate
+    return directory / f"{stem}_{uuid.uuid4().hex[:6]}.txt"
 
 
 def build_render_plan(
@@ -112,6 +132,6 @@ def build_render_plan(
         frames=frames,
         engine=engine,
         cycles_device=cycles_device,
-        log_path=output_dir / log_file_name(),
+        log_path=unique_log_path(output_dir),
         scene=scene,
     )

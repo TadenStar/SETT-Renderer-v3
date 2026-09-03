@@ -356,8 +356,10 @@ class SettingsForm(QGroupBox):
         if name:
             self.preset_changed.emit(name)
 
-    def _on_view_changed(self, index: int) -> None:
-        self.stack.setCurrentIndex(index)
+    def _on_view_changed(self, _index: int) -> None:
+        # По имени режима, а не по индексу комбобокса: порядок страниц стека
+        # и пунктов списка не обязан совпадать вечно.
+        self.stack.setCurrentIndex(_VIEW_INDEX[self.display_mode()])
         self.values_changed.emit()  # смена режима меняет действующие overrides
 
     def _show_description(self) -> None:

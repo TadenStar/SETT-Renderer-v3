@@ -185,3 +185,42 @@ def test_start_while_running_raises(qapp, tmp_path: Path, caps, project) -> None
         runner.start(job, caps, AppSettings(), project, tmp_dir=tmp_path)
     runner.stop()
     run_to_end(qapp, runner)
+
+
+def test_out_of_memory_in_one_chunk_does_not_mislabel_later_failures(qapp, tmp_path: Path, caps, project) -> None:
+    """Ошибки копятся за всю задачу; решение о ретрае должно смотреть только на текущую попытку."""
+    builder = FakePlanBuilder(tmp_path, base_frames=[1, 2], failures={1: "oom", 3: "crash"})
+    runner = make_runner(qapp, builder)
+    lines: list[str] = []
+    runner.line_received.connect(lines.append)
+    runner.start(
+        RenderJob(blend_path=project.file_path, resume=False, chunk_size=1), caps, AppSettings(), project, tmp_dir=tmp_path
+    )
+    run_to_end(qapp, runner)
+
+    assert runner.status == RUN_SUCCESS
+    # Пачка 1: OOM → один шаг урезания. Пачка 2: обычное падение → обычный повтор,
+    # а не «ещё памяти», хотя строка OOM из первой пачки всё ещё в errors.
+    assert runner.retry_notes == ["texture limit 2048"]
+    assert runner.tracker.progress.has_out_of_memory()  # в истории задачи OOM остался
+    oom_retries = [line for line in lines if line.startswith("[BRM] retry after out of memory")]
+    crash_retries = [line for line in lines if line.startswith("[BRM] retry 1/1 after failed")]
+    assert len(oom_retries) == 1 and len(crash_retries) == 1
+    assert runner.tracker.progress.frames_done == [1, 2]
+
+
+def test_finished_processes_are_released_not_accumulated(qapp, tmp_path: Path, caps, project) -> None:
+    """Каждая пачка — новый QProcess; без освобождения они копились бы детьми оркестратора."""
+    from brm.core.runner import RenderProcess
+
+    builder = FakePlanBuilder(tmp_path, base_frames=[1, 2, 3, 4], delay=0.02)
+    runner = make_runner(qapp, builder)
+    runner.start(
+        RenderJob(blend_path=project.file_path, resume=False, chunk_size=1), caps, AppSettings(), project, tmp_dir=tmp_path
+    )
+    run_to_end(qapp, runner)
+    assert runner.status == RUN_SUCCESS and len(builder.chunk_calls) == 4
+
+    for _ in range(5):  # даём отработать отложенному удалению
+        qapp.processEvents()
+    assert len(runner.findChildren(RenderProcess)) <= 1

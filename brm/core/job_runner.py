@@ -17,7 +17,7 @@ from PySide6.QtCore import QObject, Signal
 
 from brm.core.capabilities import Capabilities
 from brm.core.chunking import MAX_CRASH_RETRIES, describe_chunk, oom_retry_overrides, split_chunks
-from brm.core.log_parser import KIND_TIME, LogEvent
+from brm.core.log_parser import KIND_TIME, LogEvent, is_out_of_memory
 from brm.core.models import RenderJob
 from brm.core.output_scan import extension_for_format, scan_output
 from brm.core.project_probe import ProjectInfo
@@ -74,6 +74,7 @@ class JobRunner(QObject):
         self.oom_attempt = 0
         self.crash_attempt = 0
         self.started_at: datetime | None = None
+        self._errors_before_chunk = 0
         self._pause_requested = False
         self._stop_requested = False
 
@@ -170,12 +171,18 @@ class JobRunner(QObject):
     def _run_chunk(self, frames: list[int]) -> None:
         assert self.job is not None and self.caps is not None and self.settings is not None
         assert self.project is not None and self.tmp_dir is not None
+        assert self.tracker is not None
         job = self.job.model_copy(update={"overrides": {**self.job.overrides, **self.extra_overrides}})
         plan = self._plan_builder(
             job, self.caps, self.settings, self.project, tmp_dir=self.tmp_dir, frames_override=frames
         )
         self.plan = plan
         self.plans.append(plan)
+        # Ошибки копятся за всю задачу, а решение о ретрае касается только текущей
+        # попытки: запоминаем границу, иначе один out of memory в начале заставит
+        # лечить памятью любое следующее падение (и врать про причину).
+        self._errors_before_chunk = len(self.tracker.progress.errors)
+        self._release_process()
         process = self._process_factory()
         process.line_received.connect(self._on_line)
         process.finished.connect(self._on_process_finished)
@@ -184,6 +191,24 @@ class JobRunner(QObject):
             self.line_received.emit(f"[BRM] chunk {self.chunk_index + 1}/{len(self.chunks)}: {describe_chunk(frames)}")
         self.chunk_started.emit(plan)
         process.start(plan)
+
+    def _release_process(self) -> None:
+        """Отпускает прошлый процесс: без этого они копятся детьми оркестратора всю сессию."""
+        previous = self.process
+        if previous is None:
+            return
+        try:
+            previous.line_received.disconnect(self._on_line)
+            previous.finished.disconnect(self._on_process_finished)
+        except (RuntimeError, TypeError):  # уже отсоединён или удалён
+            pass
+        previous.deleteLater()
+        self.process = None
+
+    def _chunk_had_out_of_memory(self) -> bool:
+        """Нехватка памяти именно в текущей попытке, а не когда-либо за задачу."""
+        assert self.tracker is not None
+        return any(is_out_of_memory(line) for line in self.tracker.progress.errors[self._errors_before_chunk :])
 
     def _on_line(self, line: str) -> None:
         self.line_received.emit(line)
@@ -201,13 +226,11 @@ class JobRunner(QObject):
         return []
 
     def _remaining_overall(self) -> list[int]:
+        """Кадры задачи, которых ещё нет. Считаем по всем пачкам, а не с текущей:
+        так проверка в конце остаётся живой, а не всегда пустой."""
         assert self.tracker is not None
         done = set(self.tracker.progress.frames_done)
-        remaining: list[int] = []
-        for index, chunk in enumerate(self.chunks):
-            if index >= self.chunk_index:
-                remaining.extend(f for f in chunk if f not in done)
-        return remaining
+        return [frame for chunk in self.chunks for frame in chunk if frame not in done]
 
     def _on_process_finished(self, exit_code: int, status: str) -> None:
         assert self.tracker is not None
@@ -232,7 +255,7 @@ class JobRunner(QObject):
             return
 
         # Пачка не дошла до конца: out of memory → урезаем и повторяем, иначе один повтор.
-        if self.tracker.progress.has_out_of_memory():
+        if self._chunk_had_out_of_memory():
             self.oom_attempt += 1
             step = oom_retry_overrides(self.oom_attempt)
             if step is not None:
