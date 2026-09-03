@@ -3549,12 +3549,57 @@
      "precision": null,
      "enum_items": [
       {
-       "identifier": "NONE",
+       "identifier": "None",
        "name": "None",
-       "description": "Do not modify image in an artistic manner"
+       "description": ""
+      },
+      {
+       "identifier": "AgX - Punchy",
+       "name": "AgX - Punchy",
+       "description": ""
+      },
+      {
+       "identifier": "AgX - Greyscale",
+       "name": "AgX - Greyscale",
+       "description": ""
+      },
+      {
+       "identifier": "AgX - Very High Contrast",
+       "name": "AgX - Very High Contrast",
+       "description": ""
+      },
+      {
+       "identifier": "AgX - High Contrast",
+       "name": "AgX - High Contrast",
+       "description": ""
+      },
+      {
+       "identifier": "AgX - Medium High Contrast",
+       "name": "AgX - Medium High Contrast",
+       "description": ""
+      },
+      {
+       "identifier": "AgX - Base Contrast",
+       "name": "AgX - Base Contrast",
+       "description": ""
+      },
+      {
+       "identifier": "AgX - Medium Low Contrast",
+       "name": "AgX - Medium Low Contrast",
+       "description": ""
+      },
+      {
+       "identifier": "AgX - Low Contrast",
+       "name": "AgX - Low Contrast",
+       "description": ""
+      },
+      {
+       "identifier": "AgX - Very Low Contrast",
+       "name": "AgX - Very Low Contrast",
+       "description": ""
       }
      ],
-     "enum_dynamic": false,
+     "enum_dynamic": true,
      "factory_value": "None"
     },
     "view_transform": {
@@ -3574,12 +3619,37 @@
      "precision": null,
      "enum_items": [
       {
-       "identifier": "NONE",
-       "name": "None",
-       "description": "Do not perform any color transform on display, use old non-color managed technique for display"
+       "identifier": "AgX",
+       "name": "AgX",
+       "description": ""
+      },
+      {
+       "identifier": "Standard",
+       "name": "Standard",
+       "description": ""
+      },
+      {
+       "identifier": "Filmic",
+       "name": "Filmic",
+       "description": ""
+      },
+      {
+       "identifier": "Filmic Log",
+       "name": "Filmic Log",
+       "description": ""
+      },
+      {
+       "identifier": "False Color",
+       "name": "False Color",
+       "description": ""
+      },
+      {
+       "identifier": "Raw",
+       "name": "Raw",
+       "description": ""
       }
      ],
-     "enum_dynamic": false,
+     "enum_dynamic": true,
      "factory_value": "AgX"
     },
     "exposure": {

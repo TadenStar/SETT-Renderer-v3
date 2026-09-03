@@ -38,6 +38,7 @@ from brm.core.ffmpeg import (
     load_video_presets,
     validate_ffmpeg_path,
 )
+from brm.core.history import HistoryStore, read_frame_times
 from brm.core.job_runner import RUN_FAILED, RUN_PAUSED, RUN_STOPPED, RUN_SUCCESS, JobRunner
 from brm.core.log_parser import KIND_OTHER
 from brm.core.models import RenderJob
@@ -51,6 +52,7 @@ from brm.core.storage import SettingsStore, cache_dir, tmp_dir, with_recent_proj
 from brm.core.system_actions import SHUTDOWN_DELAY_S, cancel_shutdown, schedule_shutdown
 from brm.core.video_runner import VIDEO_SUCCESS, VideoProcess, describe_result
 from brm.ui.banner import WarningBanner
+from brm.ui.history_dialog import HistoryDialog
 from brm.ui.log_view import LogView
 from brm.ui.notifications import Notifier
 from brm.ui.progress_panel import ProgressPanel
@@ -90,6 +92,7 @@ class MainWindow(QMainWindow):
         capabilities_loader: CapabilitiesLoader | None = None,
         project_loader: ProjectLoader | None = None,
         queue_store: QueueStore | None = None,
+        history_store: HistoryStore | None = None,
     ) -> None:
         super().__init__(parent)
         self._store = store
@@ -121,6 +124,9 @@ class MainWindow(QMainWindow):
         self._active_queue_item: str | None = None
         self._queue_finished_pending = False
         self._pending_job_result: tuple[str, int, int] | None = None
+
+        self.history_store = history_store or HistoryStore()
+        self._history_dialog: HistoryDialog | None = None
 
         self.presets: list[Preset] = load_presets()
         self.resolved_preset: ResolvedPreset | None = None
@@ -174,6 +180,12 @@ class MainWindow(QMainWindow):
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        view_menu = self.menuBar().addMenu("&View")
+        history_action = QAction("&History…", self)
+        history_action.setShortcut(QKeySequence("Ctrl+H"))
+        history_action.triggered.connect(self.show_history)
+        view_menu.addAction(history_action)
 
         help_menu = self.menuBar().addMenu("&Help")
         about_action = QAction("&About BRM", self)
@@ -315,6 +327,7 @@ class MainWindow(QMainWindow):
         formats = caps.property("image_settings", "file_format")
         if formats is not None and formats.enum_items:
             self.settings_form.set_format_choices(formats.enum_identifiers())
+        self.settings_form.set_capabilities(caps)
         self.refresh_blender_status()
         self.refresh_resolved_preset()
 
@@ -559,6 +572,8 @@ class MainWindow(QMainWindow):
         self.progress_panel.set_finished(text, role, hint)
         if runner.plans:
             self.log_view.append_line(f"[BRM] finished: status={status} · {runner.message} · stats={runner.plans[0].stats_path}")
+            if status != RUN_PAUSED:
+                self._record_history(runner.plans[0].stats_path)
         paused = runner.is_paused()
         self.pause_button.setEnabled(paused)
         self.pause_button.setText("Resume" if paused else "Pause")
@@ -585,6 +600,43 @@ class MainWindow(QMainWindow):
         self._pending_job_result = None
         if result is not None:
             self._finish_queue_item(*result)
+
+    # --- история ------------------------------------------------------------------------
+
+    def _record_history(self, stats_path) -> None:
+        """Запись в history.db не должна ронять завершение рендера — ловим всё."""
+        try:
+            self.history_store.record_from_stats_file(stats_path)
+        except Exception as exc:  # noqa: BLE001 — намеренно широко, см. докстринг
+            self.log_view.append_line(f"[BRM] SKIP history: {exc}")
+            return
+        if self._history_dialog is not None:
+            self.refresh_history()
+
+    def show_history(self) -> None:
+        if self._history_dialog is None:
+            self._history_dialog = HistoryDialog(self)
+            self._history_dialog.view.refresh_requested.connect(self.refresh_history)
+            self._history_dialog.view.row_selected.connect(self._on_history_row_selected)
+        self.refresh_history()
+        self._history_dialog.show()
+        self._history_dialog.raise_()
+        self._history_dialog.activateWindow()
+
+    def refresh_history(self) -> None:
+        if self._history_dialog is None:
+            return
+        self._history_dialog.view.set_entries(self.history_store.list_entries())
+
+    def _on_history_row_selected(self, stats_path: str) -> None:
+        if self._history_dialog is None:
+            return
+        if not stats_path:
+            self._history_dialog.view.show_chart([], "")
+            return
+        entry = self._history_dialog.view.selected_entry()
+        label = f"{entry.project} · {entry.scene}" if entry and entry.scene else (entry.project if entry else "")
+        self._history_dialog.view.show_chart(read_frame_times(stats_path), label)
 
     # --- видео ------------------------------------------------------------------------
 

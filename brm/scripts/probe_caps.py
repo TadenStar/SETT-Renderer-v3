@@ -86,6 +86,22 @@ DYNAMIC_ENUM_CANDIDATES = {
         "BLUE_NOISE_ROUND",
     ],
     "compute_device_type": DEVICE_TYPE_CANDIDATES,
+    # Color Management (раздел 6 настроек): список видов и look'ов зависит от
+    # загруженного OCIO-конфига, статический RNA отдаёт не пустой список, а один
+    # служебный элемент-заглушку — надёжнее реального пробного присваивания.
+    "view_transform": ["AgX", "Standard", "Filmic", "Filmic Log", "AgX Punchy", "False Color", "Raw", "None"],
+    "look": [
+        "None",
+        "AgX - Punchy",
+        "AgX - Greyscale",
+        "AgX - Very High Contrast",
+        "AgX - High Contrast",
+        "AgX - Medium High Contrast",
+        "AgX - Base Contrast",
+        "AgX - Medium Low Contrast",
+        "AgX - Low Contrast",
+        "AgX - Very Low Contrast",
+    ],
 }
 
 
@@ -139,9 +155,15 @@ def describe_property(owner, prop, log):
         except Exception as exc:
             info["enum_items"] = []
             log.append(f"enum_items unavailable for {prop.identifier}: {exc}")
-        if not info["enum_items"] and not prop.is_readonly:
-            info["enum_items"] = probe_dynamic_enum(owner, prop, log)
-            info["enum_dynamic"] = True
+        # Некоторые динамические enum (OCIO view/look, устройство Cycles) статически
+        # отдают не пустой список, а один служебный элемент-заглушку — count(enum_items)
+        # не признак надёжности, для известных по имени свойств пробуем кандидатов всегда.
+        needs_probe = not info["enum_items"] or prop.identifier in DYNAMIC_ENUM_CANDIDATES
+        if needs_probe and not prop.is_readonly:
+            probed = probe_dynamic_enum(owner, prop, log)
+            if probed and (not info["enum_items"] or len(probed) > 1):
+                info["enum_items"] = probed
+                info["enum_dynamic"] = True
     if prop.type in SIMPLE_TYPES:
         # Значение при factory-startup. Это и есть «дефолт» с точки зрения пресетов.
         try:

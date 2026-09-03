@@ -291,6 +291,9 @@ class JobRunner(QObject):
                 "skipped_existing": self.skipped_existing,
                 "log_files": [plan.log_path.name for plan in self.plans],
                 "output_path": first.output_path,
+                # Для истории (M7): started_at не совпадает с finished_at при chunking/resume.
+                "started_at": self.started_at.isoformat(timespec="seconds"),
+                "finished_at": datetime.now().isoformat(timespec="seconds"),
             },
         )
         try:

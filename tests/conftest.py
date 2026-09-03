@@ -17,6 +17,20 @@ import pytest  # noqa: E402
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_app_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Тесты никогда не должны писать в настоящие %APPDATA%/%LOCALAPPDATA% пользователя.
+
+    settings.json, queue.json, history.db, кэш capabilities и временные файлы —
+    всё производится от этих двух переменных (core/storage.py). Без изоляции
+    тест, который не передал MainWindow явный store (queue_store/history_store),
+    молча писал бы в реальный профиль — так однажды и утекло в history.db
+    пользователя, обнаружено при разборе M7.
+    """
+    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+
+
 @pytest.fixture
 def settings_path(tmp_path: Path) -> Path:
     return tmp_path / "settings.json"
