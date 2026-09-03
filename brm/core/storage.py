@@ -43,8 +43,12 @@ class AppSettings(BaseModel):
     theme: Literal["system", "light", "dark"] = "dark"
     # Последние открытые .blend, новые в начале.
     recent_projects: list[str] = Field(default_factory=list)
-    # Последний выбранный пресет рендера.
+    # Последний выбранный пресет рендера и кодека.
     last_preset: str = "Balanced"
+    last_video_preset: str = "H.264"
+    # Собирать видео сразу после успешного рендера (M6).
+    auto_build_video: bool = False
+    notifications: bool = True
 
 
 def with_recent_project(

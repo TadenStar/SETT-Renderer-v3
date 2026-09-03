@@ -12,6 +12,14 @@ from brm.core.blender_process import run_blender
 from brm.core.capabilities import get_capabilities, run_probe, support_problem
 from brm.core.frame_range import FrameRange, FrameRangeMode
 from brm.core.models import RenderJob
+from brm.core.ffmpeg import (
+    FfmpegProgress,
+    build_ffmpeg_argv,
+    default_output_file,
+    find_sequence,
+    load_video_presets,
+    parse_ffmpeg_line,
+)
 from brm.core.output_scan import scan_output
 from brm.core.preset_resolver import compose_overrides, resolve_preset
 from brm.core.presets import load_presets
@@ -179,3 +187,34 @@ def test_presets_draft_and_final_change_the_render(real_blender: str, tiny_blend
     assert "[BRM] OK   cycles.sampling_pattern = 'BLUE_NOISE'" in final_log
     # 5.0: OPEN_EXR_MULTILAYER отвергнут, сработал запасной OPEN_EXR; в 4.x пройдёт первый.
     assert "[BRM] OK   render.image_settings.file_format = 'OPEN_EXR" in final_log
+
+
+def test_assemble_rendered_sequence_into_video(real_blender: str, real_ffmpeg: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Критерий M6: после рендера секвенции ffmpeg собирает готовый mp4."""
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+    job = RenderJob(
+        blend_path=str(tiny_blend),
+        frame_range=FrameRange(mode=FrameRangeMode.MANUAL, start=1, end=5),
+        overrides={"scene.render.resolution_x": 128, "scene.render.resolution_y": 128, "scene.eevee.taa_render_samples": 4},
+    )
+    plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path / "out")), info, tmp_dir=tmp_path / "tmp")
+    assert run_blender(plan.argv[0], plan.argv[1:], timeout=600).ok
+
+    presets = {p.name: p for p in load_video_presets(user_dir=tmp_path / "none")}
+    sequence = find_sequence(plan.output_path)
+    assert sequence.frame_count == 5 and sequence.extension == "png"
+
+    for name in ("H.264", "ProRes 422 HQ"):
+        preset = presets[name]
+        output_file = default_output_file(sequence, preset, tmp_path / "video")
+        output_file.parent.mkdir(exist_ok=True)
+        argv = build_ffmpeg_argv(real_ffmpeg, sequence, preset, output_file, fps=24)
+        result = run_blender(argv[0], argv[1:], timeout=600)  # тот же запуск процесса, что и для Blender
+        assert result.ok, result.tail(30)
+        assert output_file.is_file() and output_file.stat().st_size > 1000
+
+        progress = FfmpegProgress(total_frames=sequence.frame_count)
+        for line in result.stdout.splitlines():
+            parse_ffmpeg_line(line, progress)
+        assert progress.frame == 5 and progress.fraction == 1.0

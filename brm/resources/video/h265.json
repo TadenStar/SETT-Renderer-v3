@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "H.265",
+  "order": 30,
+  "description": "Smaller file at the same quality, worse compatibility. CRF 20 here is close to CRF 17 in H.264.",
+  "extension": "mp4",
+  "args": [
+    "-c:v", "libx265",
+    "-crf", "20",
+    "-preset", "slow",
+    "-pix_fmt", "yuv420p",
+    "-tag:v", "hvc1"
+  ],
+  "faststart": true
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "ProRes 422 HQ",
+  "order": 20,
+  "description": "Master for editing: large file, decodes fast, no visible generation loss. Use this when the video goes back into a timeline.",
+  "extension": "mov",
+  "args": [
+    "-c:v", "prores_ks",
+    "-profile:v", "3",
+    "-pix_fmt", "yuv422p10le",
+    "-vendor", "apl0"
+  ],
+  "faststart": false
+}

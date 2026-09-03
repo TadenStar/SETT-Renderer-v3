@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -23,10 +24,12 @@ from PySide6.QtWidgets import (
 )
 
 from brm.core.blender_locator import find_blender_candidates, validate_blender_path
+from brm.core.ffmpeg import find_ffmpeg, validate_ffmpeg_path
 from brm.core.storage import AppSettings
 from brm.ui.theme import set_role
 
 _THEME_CHOICES = [("Dark", "dark"), ("Light", "light"), ("System", "system")]
+FFMPEG_DOWNLOAD_HINT = "Not installed? Get a build from ffmpeg.org or run: winget install Gyan.FFmpeg"
 
 
 class SettingsDialog(QDialog):
@@ -51,8 +54,18 @@ class SettingsDialog(QDialog):
         self.ffmpeg_edit = QLineEdit(settings.ffmpeg_path or "", self)
         self.ffmpeg_edit.setMinimumWidth(320)
         self.ffmpeg_edit.setPlaceholderText("Empty — video assembly disabled")
+        self.ffmpeg_status = QLabel(self)
+        self.ffmpeg_status.setWordWrap(True)
         browse_ffmpeg = QPushButton("Browse…", self)
         browse_ffmpeg.clicked.connect(self._browse_ffmpeg)
+        autodetect_ffmpeg = QPushButton("Auto-detect", self)
+        autodetect_ffmpeg.clicked.connect(self._autodetect_ffmpeg)
+
+        self.notifications_check = QCheckBox("Notify when a job or the queue finishes", self)
+        self.notifications_check.setChecked(settings.notifications)
+        self.shutdown_check = QCheckBox("Shut down the PC after the queue finishes", self)
+        self.shutdown_check.setChecked(settings.shutdown_after_queue)
+        self.shutdown_check.setToolTip("A 60-second window with a Cancel button appears before the shutdown")
 
         self.output_edit = QLineEdit(settings.default_output_dir or "", self)
         self.output_edit.setMinimumWidth(320)
@@ -69,9 +82,12 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
         form.addRow("Blender (blender.exe):", self._row(self.blender_edit, browse_blender, autodetect))
         form.addRow("", self.blender_status)
-        form.addRow("ffmpeg (optional):", self._row(self.ffmpeg_edit, browse_ffmpeg))
+        form.addRow("ffmpeg (optional):", self._row(self.ffmpeg_edit, browse_ffmpeg, autodetect_ffmpeg))
+        form.addRow("", self.ffmpeg_status)
         form.addRow("Default output folder:", self._row(self.output_edit, browse_output))
         form.addRow("Theme:", self.theme_combo)
+        form.addRow("After render:", self.notifications_check)
+        form.addRow("", self.shutdown_check)
 
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
@@ -88,7 +104,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(self._buttons)
 
         self.blender_edit.textChanged.connect(self._revalidate)
+        self.ffmpeg_edit.textChanged.connect(self._revalidate_ffmpeg)
         self._revalidate()
+        self._revalidate_ffmpeg()
 
     # --- публичное API -------------------------------------------------------
 
@@ -104,6 +122,8 @@ class SettingsDialog(QDialog):
                 "ffmpeg_path": _none_if_blank(self.ffmpeg_edit.text()),
                 "default_output_dir": _none_if_blank(self.output_edit.text()),
                 "theme": self.theme_combo.currentData(),
+                "notifications": self.notifications_check.isChecked(),
+                "shutdown_after_queue": self.shutdown_check.isChecked(),
             }
         )
 
@@ -145,6 +165,24 @@ class SettingsDialog(QDialog):
         )
         if accepted and choice:
             self.blender_edit.setText(choice)
+
+    def _revalidate_ffmpeg(self) -> None:
+        text = self.ffmpeg_edit.text().strip()
+        if not text:
+            self.ffmpeg_status.setText(f"Video assembly is disabled. {FFMPEG_DOWNLOAD_HINT}")
+            set_role(self.ffmpeg_status, "muted")
+            return
+        status = validate_ffmpeg_path(text)
+        self.ffmpeg_status.setText("ffmpeg found." if status.ok else status.reason)
+        set_role(self.ffmpeg_status, "ok" if status.ok else "error")
+
+    def _autodetect_ffmpeg(self) -> None:
+        found = find_ffmpeg()
+        if found:
+            self.ffmpeg_edit.setText(found)
+            return
+        self.ffmpeg_status.setText(f"No ffmpeg found in PATH or the usual folders. {FFMPEG_DOWNLOAD_HINT}")
+        set_role(self.ffmpeg_status, "error")
 
     def _browse_ffmpeg(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

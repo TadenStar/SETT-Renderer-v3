@@ -35,6 +35,9 @@ class WarningBanner(QFrame):
     def message(self) -> str:
         return self._label.text()
 
+    def set_button_text(self, text: str) -> None:
+        self._button.setText(text)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 — имя из Qt
         # Клик по любой точке плашки ведёт в настройки, не только по кнопке.
         if event.button() == Qt.MouseButton.LeftButton:
