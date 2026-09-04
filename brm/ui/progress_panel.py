@@ -1,4 +1,4 @@
-"""Панель «Progress» (раздел 4.4 спеки): два прогресс-бара, строка статуса, sparkline.
+"""Панель «Progress» (раздел 4.4 спеки): два прогресс-бара, строка статуса, график.
 
 Только отображение: числа приходят готовыми из core.render_stats.
 """
@@ -7,7 +7,8 @@ from __future__ import annotations
 from PySide6.QtWidgets import QGroupBox, QLabel, QProgressBar, QVBoxLayout, QWidget
 
 from brm.core.render_stats import RenderProgress, format_duration, format_memory
-from brm.ui.sparkline import Sparkline
+from brm.core.frame_chart import ROLE_CURRENT, ChartSeries
+from brm.ui.frame_chart import FrameChart
 from brm.ui.theme import set_role
 
 
@@ -27,8 +28,11 @@ class ProgressPanel(QGroupBox):
         self.frames_bar.setFormat("%v / %m frames")
         self.samples_bar = QProgressBar(self)
         self.samples_bar.setFormat("sample %v / %m")
-        self.sparkline = Sparkline(self)
-        self.sparkline.setToolTip("Frame time, left to right")
+        # Линии прошлых рендеров подставляет главное окно: панель их не знает.
+        self._history_series: list[ChartSeries] = []
+        self._current_times: list[tuple[int, float]] = []
+        self.chart = FrameChart(self)
+        self.chart.setToolTip("Frame time, left to right. Blue is this render, red are earlier ones")
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.status_label)
@@ -36,7 +40,7 @@ class ProgressPanel(QGroupBox):
         layout.addWidget(self.samples_bar)
         layout.addWidget(self.detail_label)
         layout.addWidget(self.hint_label)
-        layout.addWidget(self.sparkline)
+        layout.addWidget(self.chart)
         self.set_idle()
 
     def set_idle(self) -> None:
@@ -47,7 +51,8 @@ class ProgressPanel(QGroupBox):
         for bar in (self.frames_bar, self.samples_bar):
             bar.setRange(0, 1)
             bar.setValue(0)
-        self.sparkline.clear()
+        self._current_times = []
+        self.chart.clear()
 
     def set_running(self, total_frames: int) -> None:
         self.status_label.setText(f"Starting Blender, {total_frames} frame(s) queued…")
@@ -58,7 +63,8 @@ class ProgressPanel(QGroupBox):
         self.frames_bar.setValue(0)
         self.samples_bar.setRange(0, 1)
         self.samples_bar.setValue(0)
-        self.sparkline.clear()
+        self._current_times = []
+        self.chart.clear()
 
     def update_progress(self, progress: RenderProgress, elapsed_s: float, note: str = "") -> None:
         total = max(progress.frames_total, 1)
@@ -94,7 +100,7 @@ class ProgressPanel(QGroupBox):
         if progress.engine:
             details.append(progress.engine)
         self.detail_label.setText(" · ".join(details))
-        self.sparkline.set_values(times)
+        self.set_current_times(times)
 
     def set_finished(self, text: str, role: str = "", hint: str | None = None) -> None:
         self.status_label.setText(text)
@@ -104,3 +110,21 @@ class ProgressPanel(QGroupBox):
             self.hint_label.show()
         else:
             self.hint_label.hide()
+
+    def set_history_series(self, series: list[ChartSeries]) -> None:
+        """Линии прошлых рендеров, поверх которых рисуется текущий.
+
+        Сразу перерисовываем: историю могли почистить прямо во время рендера,
+        и тогда красные линии обязаны исчезнуть, а синяя — остаться.
+        """
+        self._history_series = list(series)
+        self.set_current_times(self._current_times)
+
+    def set_current_times(self, times: list[tuple[int, float]]) -> None:
+        self._current_times = list(times)
+        series = list(self._history_series)
+        if times:
+            series.insert(0, ChartSeries("Current render", tuple(times), ROLE_CURRENT))
+        # live=True: по горизонтали видно только текущий прогон, иначе его линия
+        # ползла бы по куску оси, растянутой под длинный прошлый рендер.
+        self.chart.set_series(series, live=bool(times))

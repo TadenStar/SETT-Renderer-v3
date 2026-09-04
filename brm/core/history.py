@@ -188,6 +188,18 @@ class HistoryStore:
         entry.id = self.record(entry)
         return entry
 
+    def delete_entry(self, entry_id: int) -> bool:
+        """Убирает один прогон из истории. False — записи с таким id не было."""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM renders WHERE id = ?", (entry_id,))
+            return cursor.rowcount > 0
+
+    def clear(self) -> int:
+        """Стирает историю целиком и возвращает число удалённых записей."""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM renders")
+            return int(cursor.rowcount)
+
     def list_entries(
         self, *, order_by: str = "finished_at", descending: bool = True, limit: int | None = None
     ) -> list[HistoryEntry]:

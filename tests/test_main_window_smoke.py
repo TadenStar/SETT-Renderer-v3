@@ -27,7 +27,8 @@ from brm.ui.progress_panel import ProgressPanel
 from brm.ui.queue_view import frames_text
 from brm.ui.settings_dialog import SettingsDialog
 from brm.ui.settings_form import MODE_CUSTOM, MODE_PRESET, MODE_SKIP, SettingsForm
-from brm.ui.sparkline import Sparkline
+from brm.core.frame_chart import ROLE_CURRENT
+from brm.ui.frame_chart import FrameChart
 
 CAPS_FIXTURE = "capabilities_blender_5.0.1.json"
 PROJECT_FIXTURE = "project_default_scene_5.0.1.json"
@@ -226,17 +227,40 @@ def test_progress_panel_states(qapp) -> None:
     panel.set_finished("Failed", "error", hint="Out of memory")
     assert not panel.hint_label.isHidden()
     panel.set_idle()
-    assert panel.hint_label.isHidden() and panel.sparkline.values() == []
+    assert panel.hint_label.isHidden() and panel.chart.series() == []
 
 
-def test_sparkline_paints_and_shows_tooltip(qapp) -> None:
-    widget = Sparkline()
-    widget.resize(200, 60)
-    widget.set_values([(1, 0.5), (2, 1.5), (3, 1.0)])
+def current_points(chart: FrameChart) -> list[tuple[int, float]]:
+    """Точки синей линии — того прогона, который на графике считается текущим."""
+    current = [s for s in chart.series() if s.role == ROLE_CURRENT]
+    return list(current[0].points) if current else []
+
+
+def test_frame_chart_paints_and_shows_tooltip(qapp) -> None:
+    from brm.core.frame_chart import ROLE_RECENT, ROLE_REFERENCE, ChartSeries
+
+    widget = FrameChart()
+    widget.resize(200, 90)
+    widget.set_series([
+        ChartSeries("Current render", ((1, 0.5), (2, 1.5), (3, 1.0)), ROLE_CURRENT),
+        ChartSeries("Yesterday", ((1, 2.0), (2, 2.5), (3, 2.2)), ROLE_RECENT, age=0),
+        ChartSeries("Gold", ((1, 1.8), (2, 1.9), (3, 1.7)), ROLE_REFERENCE),
+    ])
     assert not widget.grab().isNull()
-    event = QMouseEvent(QEvent.Type.MouseMove, QPointF(2, 30), QPointF(2, 30), Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+    event = QMouseEvent(QEvent.Type.MouseMove, QPointF(2, 88), QPointF(2, 88), Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
     widget.mouseMoveEvent(event)
-    assert widget.toolTip() == "Frame 1: 0.50 s"
+    assert "frame 1" in widget.toolTip()
+
+
+def test_frame_chart_colors_fade_with_age(qapp) -> None:
+    """Чем старше прогон, тем темнее его линия — как просил Павел."""
+    from brm.core.frame_chart import ROLE_RECENT, ChartSeries
+
+    widget = FrameChart()
+    shades = [widget.color_for(ChartSeries("x", ((1, 1.0),), ROLE_RECENT, age=age)) for age in range(5)]
+    lightness = [c.lightness() for c in shades]
+    assert lightness == sorted(lightness, reverse=True), lightness
+    assert all(a.alpha() >= b.alpha() for a, b in zip(shades, shades[1:], strict=False))
 
 
 def test_settings_form_modes_and_values(qapp, fixtures_dir: Path) -> None:
@@ -369,7 +393,7 @@ def test_pause_after_frame_and_resume(qapp, settings_path: Path, fake_blender: P
     wait_until(qapp, lambda: window.runner.status == "success", timeout=30)
     assert window.runner.tracker.progress.frames_done == [1, 2, 3, 4]  # сквозной прогресс
     assert "Finished" in window.progress_panel.status_label.text() and window.pause_button.text() == "Pause"
-    assert window.progress_panel.sparkline.values() == [(f, 0.1) for f in [1, 2, 3, 4]]
+    assert current_points(window.progress_panel.chart) == [(f, 0.1) for f in [1, 2, 3, 4]]
     stats = json.loads(window.runner.plans[0].stats_path.read_text(encoding="utf-8"))
     assert stats["frames_done"] == [1, 2, 3, 4] and stats["status"] == "success"
     assert builder.chunk_calls[0] == [1, 2]
@@ -707,7 +731,7 @@ def test_history_dialog_shows_entries_and_chart(
     entry = view.selected_entry()
     assert entry is not None and entry.frames_done == 3
     # fake_render_script печатает фиксированный "Time: 00:00.10" независимо от delay.
-    assert view.sparkline.values() == [(f, 0.1) for f in (1, 2, 3)]
+    assert current_points(view.chart) == [(f, 0.1) for f in (1, 2, 3)]
     assert "Scene" in view.chart_label.text()
 
     # Диалог уже открыт — новая запись в истории должна дойти до таблицы без повторного show_history().
@@ -1288,3 +1312,147 @@ def test_build_number_is_next_to_the_author(qapp, settings_path: Path) -> None:
 
     window = MainWindow(SettingsStore(settings_path))
     assert window.credit_label.text() == f"Made by Pavel Postnikov · Build {__build__}"
+
+
+# --- график истории кадров ---------------------------------------------------------
+
+
+def _history_window(qapp, store, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch, runs: int = 2):
+    """Окно с историей из нескольких прошедших рендеров."""
+    from brm.core.history import HistoryStore
+
+    history_store = HistoryStore(tmp_path / "history.db")
+    builder = FakePlanBuilder(tmp_path, base_frames=[1, 2, 3], delay=0.02)
+    window = make_window(
+        store, caps_loader=caps_loader, project_loader=project_loader, fake_builder=builder, monkeypatch=monkeypatch
+    )
+    window.history_store = history_store
+    load_project(qapp, window, blend_file)
+    window.project_panel.resume_check.setChecked(False)
+    for _ in range(runs):
+        window.start_render()
+        wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
+    window.show_history()
+    return window
+
+
+def test_chart_shows_the_selected_run_over_the_earlier_ones(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from brm.core.frame_chart import ROLE_CURRENT, ROLE_RECENT
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = _history_window(qapp, store, caps_loader, project_loader, blend_file, tmp_path, monkeypatch, runs=3)
+    view = window._history_dialog.view
+    view.table.selectRow(0)
+
+    roles = [s.role for s in view.chart.series()]
+    assert roles.count(ROLE_CURRENT) == 1  # выбранный прогон — синяя линия
+    assert roles.count(ROLE_RECENT) == 2  # остальные два, синим не дублируются
+    assert current_points(view.chart) == [(f, 0.1) for f in (1, 2, 3)]
+    # В покое ось X охватывает все линии, а не только выбранную.
+    assert view.chart.bounds().empty is False
+
+
+def test_reference_run_is_marked_and_remembered(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from brm.core.frame_chart import ROLE_REFERENCE
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = _history_window(qapp, store, caps_loader, project_loader, blend_file, tmp_path, monkeypatch, runs=2)
+    view = window._history_dialog.view
+    view.table.selectRow(1)  # объявляем эталоном не тот, что выбран потом
+    reference = view.selected_entry()
+    assert reference is not None
+
+    window.toggle_reference_render()
+    assert store.load().reference_render_id == reference.id  # выбор переживёт перезапуск
+    assert view.reference_button.text() == "Clear reference"
+
+    view.table.selectRow(0)
+    roles = [s.role for s in view.chart.series()]
+    assert ROLE_REFERENCE in roles
+    assert "reference" in view.chart_label.text()
+
+    view.table.selectRow(1)
+    window.toggle_reference_render()
+    assert store.load().reference_render_id is None
+    assert view.reference_button.text() == "Set as reference"
+
+
+def test_deleting_a_run_also_clears_it_as_reference(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from brm.ui import main_window as main_window_mod
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = _history_window(qapp, store, caps_loader, project_loader, blend_file, tmp_path, monkeypatch, runs=2)
+    view = window._history_dialog.view
+    view.table.selectRow(0)
+    window.toggle_reference_render()
+    assert store.load().reference_render_id is not None
+
+    monkeypatch.setattr(
+        main_window_mod.QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    view.table.selectRow(0)
+    window.delete_selected_render()
+    assert view.table.rowCount() == 1
+    assert store.load().reference_render_id is None  # эталон не должен висеть на удалённом
+
+
+def test_clearing_the_whole_history(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from brm.ui import main_window as main_window_mod
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = _history_window(qapp, store, caps_loader, project_loader, blend_file, tmp_path, monkeypatch, runs=2)
+    monkeypatch.setattr(
+        main_window_mod.QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    window.clear_render_history()
+
+    view = window._history_dialog.view
+    assert view.table.rowCount() == 0 and view.chart.series() == []
+    assert "History cleared, 2 render(s) removed" in window.log_view.status_label.text()
+    # На живом графике красные линии исчезли, синяя от прошедшего прогона осталась:
+    # это результат текущей сессии, а не запись истории.
+    assert [s.role for s in window.progress_panel.chart.series()] == ["current"]
+
+
+def test_live_chart_draws_earlier_runs_under_the_current_one(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Синяя линия идущего рендера поверх красных прошлых — идея из отзыва."""
+    from brm.core.frame_chart import ROLE_CURRENT, ROLE_RECENT
+    from brm.core.history import HistoryStore
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    history_store = HistoryStore(tmp_path / "history.db")
+    builder = FakePlanBuilder(tmp_path, base_frames=[1, 2, 3], delay=0.02)
+    window = make_window(
+        store, caps_loader=caps_loader, project_loader=project_loader, fake_builder=builder, monkeypatch=monkeypatch
+    )
+    window.history_store = history_store
+    load_project(qapp, window, blend_file)
+    window.project_panel.resume_check.setChecked(False)
+
+    window.start_render()  # первый прогон ложится в историю
+    wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
+    window.start_render()  # второй рисуется поверх него
+    wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
+
+    roles = [s.role for s in window.progress_panel.chart.series()]
+    assert roles.count(ROLE_CURRENT) == 1 and ROLE_RECENT in roles
+    assert current_points(window.progress_panel.chart) == [(f, 0.1) for f in (1, 2, 3)]

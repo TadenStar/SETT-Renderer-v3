@@ -39,7 +39,10 @@ from brm.core.ffmpeg import (
     load_video_presets,
     validate_ffmpeg_path,
 )
-from brm.core.history import HistoryStore, read_frame_times
+from dataclasses import replace
+
+from brm.core.frame_chart import build_series
+from brm.core.history import HistoryEntry, HistoryStore, read_frame_times
 from brm.core.job_runner import RUN_FAILED, RUN_PAUSED, RUN_STOPPED, RUN_SUCCESS, JobRunner
 from brm.core.log_parser import KIND_OTHER, KIND_SAVED
 from brm.core.models import RenderJob
@@ -197,6 +200,7 @@ class MainWindow(QMainWindow):
         self.refresh_ffmpeg_status()
         self.refresh_blender_status()
         self._start_hardware_probe()
+        self._refresh_live_chart_history()
 
     # --- построение ----------------------------------------------------------
 
@@ -816,8 +820,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001 — намеренно широко, см. докстринг
             self.log_view.append_line(f"[BRM] SKIP history: {exc}")
             return
-        if self._history_dialog is not None:
-            self.refresh_history()
+        # Обновляем всегда: линии прошлых прогонов нужны живому графику,
+        # даже когда окно истории ни разу не открывали.
+        self.refresh_history()
 
     # --- превью последнего кадра ---------------------------------------------------
 
@@ -873,27 +878,97 @@ class MainWindow(QMainWindow):
     def show_history(self) -> None:
         if self._history_dialog is None:
             self._history_dialog = HistoryDialog(self)
-            self._history_dialog.view.refresh_requested.connect(self.refresh_history)
-            self._history_dialog.view.row_selected.connect(self._on_history_row_selected)
+            view = self._history_dialog.view
+            view.refresh_requested.connect(self.refresh_history)
+            view.row_selected.connect(self._on_history_row_selected)
+            view.reference_toggled.connect(self.toggle_reference_render)
+            view.delete_requested.connect(self.delete_selected_render)
+            view.clear_requested.connect(self.clear_render_history)
         self.refresh_history()
         self._history_dialog.show()
         self._history_dialog.raise_()
         self._history_dialog.activateWindow()
 
     def refresh_history(self) -> None:
-        if self._history_dialog is None:
-            return
-        self._history_dialog.view.set_entries(self.history_store.list_entries())
+        if self._history_dialog is not None:
+            self._history_dialog.view.set_entries(self.history_store.list_entries())
+        self._refresh_live_chart_history()
+
+    # --- график времени кадров ---------------------------------------------------
+
+    @staticmethod
+    def _entry_label(entry: HistoryEntry) -> str:
+        scene = f" · {entry.scene}" if entry.scene else ""
+        return f"{entry.project}{scene} · {entry.preset or 'no preset'}"
+
+    def _history_points(self, limit: int = 12) -> list[tuple[int, str, list[tuple[int, float]]]]:
+        """(id, подпись, точки) от новых к старым. Читается из stats-файлов рядом с логом."""
+        result = []
+        for entry in self.history_store.list_entries(limit=limit):
+            if entry.id is None:
+                continue
+            result.append((entry.id, self._entry_label(entry), read_frame_times(entry.stats_path)))
+        return result
+
+    def _refresh_live_chart_history(self) -> None:
+        """Прошлые прогоны под линией текущего рендера в панели прогресса."""
+        history = self._history_points()
+        series = build_series(None, history, reference_id=self.settings.reference_render_id)
+        self.progress_panel.set_history_series(series)
 
     def _on_history_row_selected(self, stats_path: str) -> None:
         if self._history_dialog is None:
             return
-        if not stats_path:
-            self._history_dialog.view.show_chart([], "")
+        view = self._history_dialog.view
+        entry = view.selected_entry()
+        selected = read_frame_times(stats_path) if stats_path else None
+        history = [item for item in self._history_points() if entry is None or item[0] != entry.id]
+        series = build_series(selected, history, reference_id=self.settings.reference_render_id)
+        if selected and entry is not None:
+            # Выбранная строка — «текущая» линия графика: синим, поверх остальных.
+            series[0] = replace(series[0], label=self._entry_label(entry))
+        view.show_series(series)
+        is_reference = entry is not None and entry.id == self.settings.reference_render_id
+        view.set_reference_state(is_reference=is_reference, has_selection=entry is not None)
+
+    def toggle_reference_render(self) -> None:
+        """Эталон рисуется золотым на каждом графике и не вытесняется возрастом."""
+        if self._history_dialog is None:
             return
         entry = self._history_dialog.view.selected_entry()
-        label = f"{entry.project} · {entry.scene}" if entry and entry.scene else (entry.project if entry else "")
-        self._history_dialog.view.show_chart(read_frame_times(stats_path), label)
+        if entry is None or entry.id is None:
+            return
+        current = self.settings.reference_render_id
+        self.settings.reference_render_id = None if current == entry.id else entry.id
+        self._store.save(self.settings)
+        self.refresh_history()
+        self._on_history_row_selected(entry.stats_path)
+
+    def delete_selected_render(self) -> None:
+        if self._history_dialog is None:
+            return
+        entry = self._history_dialog.view.selected_entry()
+        if entry is None or entry.id is None:
+            return
+        answer = QMessageBox.question(self, "Delete render", f"Remove {self._entry_label(entry)} from the history?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.history_store.delete_entry(entry.id)
+        if self.settings.reference_render_id == entry.id:
+            self.settings.reference_render_id = None
+            self._store.save(self.settings)
+        self.refresh_history()
+
+    def clear_render_history(self) -> None:
+        answer = QMessageBox.question(self, "Clear history", "Erase the whole render history?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        removed = self.history_store.clear()
+        if self.settings.reference_render_id is not None:
+            self.settings.reference_render_id = None
+            self._store.save(self.settings)
+        self.refresh_history()
+        self.log_view.set_status(f"History cleared, {removed} render(s) removed", "ok")
 
     # --- видео ------------------------------------------------------------------------
 

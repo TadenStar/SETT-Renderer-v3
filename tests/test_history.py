@@ -188,3 +188,20 @@ def test_cyrillic_paths_are_stored_as_is(store: HistoryStore, tmp_path: Path) ->
     assert entry.project == "пещера v3"
     reloaded = store.list_entries()[0]
     assert reloaded.blend_path == r"D:\Рендер\пещера v3.blend"
+
+
+def test_delete_one_entry_and_clear_everything(tmp_path: Path) -> None:
+    """Отзыв: нужна очистка всей истории и удаление отдельного рендера."""
+    store = HistoryStore(tmp_path / "history.db")
+    ids = [
+        store.record(entry_from_stats(make_stats(scene=f"S{i}"), tmp_path / f"stats{i}.json"))
+        for i in range(3)
+    ]
+
+    assert store.delete_entry(ids[1]) is True
+    assert store.delete_entry(ids[1]) is False  # второй раз удалять нечего
+    assert [e.id for e in store.list_entries(order_by="id", descending=False)] == [ids[0], ids[2]]
+
+    assert store.clear() == 2
+    assert store.list_entries() == []
+    assert store.clear() == 0
