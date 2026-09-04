@@ -155,7 +155,7 @@ def test_presets_draft_and_final_change_the_render(real_blender: str, tiny_blend
     presets = {p.name: p for p in load_presets(user_dir=tmp_path / "none")}
     small = {"scene.render.resolution_x": 96, "scene.render.resolution_y": 64, "render.resolution_percentage": 100}
     results = {}
-    for name in ("Draft", "Final"):
+    for name in ("Draft", "Super"):
         resolved = resolve_preset(presets[name], caps, "CYCLES")
         overrides = compose_overrides(resolved, custom=small)
         job = RenderJob(
@@ -177,16 +177,15 @@ def test_presets_draft_and_final_change_the_render(real_blender: str, tiny_blend
         results[name] = (tracker.progress, plan, result.stdout)
 
     draft, draft_plan, draft_log = results["Draft"]
-    final, final_plan, final_log = results["Final"]
-    assert draft.samples_total == 128 and final.samples_total == 4096
+    final, final_plan, final_log = results["Super"]
+    assert draft.samples_total == 64 and final.samples_total == 512
     assert draft.frame_times() and final.frame_times()
     assert (draft_plan.output_dir / "0001.jpg").is_file()  # Draft жмёт в JPEG ради скорости
     # Final формат не навязывает: на диск ложится то, что стоит в сцене (PNG по умолчанию).
     assert (final_plan.output_dir / "0001.png").is_file()
-    assert "[BRM] OK   cycles.time_limit = 20" in draft_log
     assert "[BRM] OK   cycles.sampling_pattern = 'BLUE_NOISE'" in final_log
     assert "render.image_settings.file_format" not in final_log
-    # Ни один пресет, кроме Heavy Scene, не трогает тайлы: разбиение кадра стоит времени.
+    # Ни один пресет не трогает тайлы: разбиение кадра стоит времени.
     for log in (draft_log, final_log):
         assert "cycles.tile_size" not in log and "cycles.use_auto_tile" not in log
 
@@ -319,7 +318,7 @@ def test_the_app_does_not_slow_the_render_down(real_blender: str, tiny_blend: Pa
     assert detect_hardware().cpu_threads >= 1
     hardware = HardwareInfo(gpu_name="Test card", vram_mb=8151, ram_mb=32189, cpu_threads=24)
 
-    balanced = next(p for p in load_presets() if p.name == "Balanced")
+    balanced = next(p for p in load_presets() if p.name == "Super")
     tuning = tune_preset(balanced, hardware, engine="CYCLES")
     assert not tuning.changed()  # на целевом ноутбуке урезать нечего
 

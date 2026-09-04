@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QInputDialog,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -52,7 +53,15 @@ from brm.core.preset_resolver import (
     resolve_preset,
 )
 from brm.core.preview import describe_unpreviewable, is_previewable, latest_rendered_frame
-from brm.core.presets import Preset, find_preset, load_presets
+from brm.core.presets import (
+    Preset,
+    PresetError,
+    delete_user_preset,
+    find_preset,
+    load_presets,
+    preset_from_overrides,
+    save_user_preset,
+)
 from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
 from brm.core.queue import QueueStore, RenderQueue
 from brm.core.render_plan import RenderPlan, resolve_output_path
@@ -170,6 +179,8 @@ class MainWindow(QMainWindow):
         self.settings_form.preset_changed.connect(self._on_preset_changed)
         self.settings_form.set_tuning_enabled(self.settings.tune_for_hardware)
         self.settings_form.tuning_toggled.connect(self._on_tuning_toggled)
+        self.settings_form.save_preset_requested.connect(self.save_current_as_preset)
+        self.settings_form.delete_preset_requested.connect(self.delete_selected_preset)
         self.project_panel.scene_combo.currentTextChanged.connect(lambda _name: self.refresh_resolved_preset())
         self.queue_view.set_items(self.queue.items)
         self.video_panel.set_presets(self.video_presets, self.settings.last_video_preset)
@@ -404,6 +415,52 @@ class MainWindow(QMainWindow):
             self._store.save(self.settings)
         self.refresh_resolved_preset()
 
+    # --- свои пресеты --------------------------------------------------------------
+
+    def save_current_as_preset(self) -> None:
+        """Текущие значения формы — в именованный пресет пользователя."""
+        job = self.compose_job()
+        if job is None or not job.overrides:
+            self.log_view.set_status("Load a project first: there is nothing to save yet", "warning")
+            return
+        current = self.settings_form.current_preset_name() or ""
+        name, ok = QInputDialog.getText(self, "Save preset", "Preset name:", text=f"{current} copy".strip())
+        name = name.strip()
+        if not ok or not name:
+            return
+        if any(p.builtin and p.name == name for p in self.presets):
+            self.log_view.set_status(f"{name} is a built-in preset, pick another name", "error")
+            return
+        preset = preset_from_overrides(name, job.overrides, description="Your own preset.")
+        try:
+            save_user_preset(preset)
+        except PresetError as exc:
+            self.log_view.set_status(str(exc), "error")
+            return
+        self.reload_presets(select=name)
+        self.log_view.set_status(f"Preset {name} saved", "ok")
+
+    def delete_selected_preset(self) -> None:
+        preset = self.settings_form.current_preset()
+        if preset is None or preset.builtin:
+            return
+        answer = QMessageBox.question(self, "Delete preset", f"Delete preset {preset.name}?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_user_preset(preset.name)
+        except PresetError as exc:
+            self.log_view.set_status(str(exc), "error")
+            return
+        self.reload_presets()
+        self.log_view.set_status(f"Preset {preset.name} deleted", "ok")
+
+    def reload_presets(self, select: str | None = None) -> None:
+        self.presets = load_presets()
+        target = select or self.settings_form.current_preset_name() or self.settings.last_preset
+        self.settings_form.set_presets(self.presets, target)
+        self.refresh_resolved_preset()
+
     # --- железо ------------------------------------------------------------------
 
     def _start_hardware_probe(self) -> None:
@@ -464,7 +521,12 @@ class MainWindow(QMainWindow):
             self.settings_form.set_engine(None)
             self.settings_form.show_resolved(None)
             return
-        self.resolved_preset = resolve_preset(self.tuned_preset(preset, scene.engine), self.capabilities, scene.engine)
+        self.resolved_preset = resolve_preset(
+            self.tuned_preset(preset, scene.engine),
+            self.capabilities,
+            scene.engine,
+            scene_percentage=scene.resolution_percentage,
+        )
         self.settings_form.set_engine(self.resolved_preset.engine)
         self.settings_form.show_resolved(self.resolved_preset)
 

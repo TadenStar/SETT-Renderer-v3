@@ -103,7 +103,14 @@ def _resolve_value(prop: PropertyInfo | None, value: Any) -> tuple[Any, Any, str
     return value, value, None
 
 
-def _output_items(preset: Preset, display_format: str | None) -> list[tuple[str, Any]]:
+def scaled_resolution(out_scale: float, scene_percentage: int) -> int:
+    """Доля от процента сцены, не меньше 1%."""
+    return max(1, round(scene_percentage * out_scale))
+
+
+def _output_items(
+    preset: Preset, display_format: str | None, scene_percentage: int | None = None
+) -> list[tuple[str, Any]]:
     """Настройки вывода в правильном порядке: формат раньше глубины цвета и кодека."""
     out = preset.output
     items: list[tuple[str, Any]] = []
@@ -121,6 +128,8 @@ def _output_items(preset: Preset, display_format: str | None) -> list[tuple[str,
         items.append(("render.image_settings.exr_codec", out.exr_codec))
     if out.resolution_percentage is not None:
         items.append(("render.resolution_percentage", out.resolution_percentage))
+    elif out.resolution_scale is not None and scene_percentage is not None:
+        items.append(("render.resolution_percentage", scaled_resolution(out.resolution_scale, scene_percentage)))
     if out.resolution_x is not None:
         items.append(("render.resolution_x", out.resolution_x))
     if out.resolution_y is not None:
@@ -130,14 +139,21 @@ def _output_items(preset: Preset, display_format: str | None) -> list[tuple[str,
     return items
 
 
-def resolve_preset(preset: Preset, caps: Capabilities, scene_engine: str) -> ResolvedPreset:
+def resolve_preset(
+    preset: Preset, caps: Capabilities, scene_engine: str, scene_percentage: int | None = None
+) -> ResolvedPreset:
+    """``scene_percentage`` нужен пресетам с ``resolution_scale``: Draft берёт
+    половину от того, что стоит в сцене, а не абсолютное число."""
     engine = resolve_engine(preset, caps, scene_engine)
 
     format_prop = caps.property("image_settings", "file_format")
     _, display_format, format_reason = _resolve_value(format_prop, preset.output.file_format)
     resolved = ResolvedPreset(preset=preset, engine=engine, file_format=display_format)
 
-    sections: list[list[tuple[str, Any]]] = [_output_items(preset, display_format), list(preset.common.items())]
+    sections: list[list[tuple[str, Any]]] = [
+        _output_items(preset, display_format, scene_percentage),
+        list(preset.common.items()),
+    ]
     if engine == "CYCLES":
         sections.append(list(preset.cycles.items()))
     elif engine.startswith("BLENDER_EEVEE"):

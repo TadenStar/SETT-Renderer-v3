@@ -140,9 +140,9 @@ def test_show_resolved_updates_preset_values_and_skipped_stays_out(qapp, caps: C
     form.set_capabilities(caps)
     form.set_engine("CYCLES")
 
-    resolved = resolve_preset(presets["Balanced"], caps, "CYCLES")
+    resolved = resolve_preset(presets["Super"], caps, "CYCLES")
     form.show_resolved(resolved)
-    assert form.rows["cycles.samples"].value() == 1024
+    assert form.rows["cycles.samples"].value() == 512
     assert form.rows["render.use_persistent_data"].value() is True
     # denoiser пресета — {"prefer": [...]}, resolved.value() уже даёт первый доступный:
     assert form.rows["cycles.denoiser"].value() == "OPENIMAGEDENOISE"

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -223,6 +224,8 @@ class SettingsForm(QGroupBox):
     preset_changed = Signal(str)
     values_changed = Signal()
     tuning_toggled = Signal(bool)
+    save_preset_requested = Signal()
+    delete_preset_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Render Settings", parent)
@@ -232,9 +235,25 @@ class SettingsForm(QGroupBox):
 
         self.preset_combo = QComboBox(self)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_index)
+        self.save_preset_button = QPushButton("Save as…", self)
+        self.save_preset_button.setToolTip("Save the current settings as your own preset")
+        self.save_preset_button.clicked.connect(self.save_preset_requested)
+        self.delete_preset_button = QPushButton("Delete", self)
+        self.delete_preset_button.setToolTip("Delete the selected preset of your own")
+        self.delete_preset_button.clicked.connect(self.delete_preset_requested)
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(self.preset_combo, 1)
+        preset_row.addWidget(self.save_preset_button)
+        preset_row.addWidget(self.delete_preset_button)
+
         self.description_label = QLabel("", self)
         self.description_label.setWordWrap(True)
         set_role(self.description_label, "muted")
+
+        self.warning_label = QLabel("", self)
+        self.warning_label.setWordWrap(True)
+        set_role(self.warning_label, "warning")
+        self.warning_label.hide()
 
         self.tune_check = QCheckBox("Tune for this machine", self)
         self.tune_check.setToolTip(
@@ -288,8 +307,9 @@ class SettingsForm(QGroupBox):
         self.stack.setCurrentIndex(_VIEW_INDEX[VIEW_SIMPLE])
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self.preset_combo)
+        layout.addLayout(preset_row)
         layout.addWidget(self.description_label)
+        layout.addWidget(self.warning_label)
         layout.addWidget(self.tune_check)
         layout.addWidget(self.tuning_label)
         layout.addLayout(view_row)
@@ -405,6 +425,14 @@ class SettingsForm(QGroupBox):
         self.values_changed.emit()  # смена режима меняет действующие overrides
 
     def _show_description(self) -> None:
-        name = self.current_preset_name()
-        preset = next((p for p in self._presets if p.name == name), None)
+        preset = self.current_preset()
         self.description_label.setText(preset.description if preset else "")
+        warning = preset.warning if preset else ""
+        self.warning_label.setText(warning)
+        self.warning_label.setVisible(bool(warning))
+        # Встроенные пресеты удалять нельзя: они лежат в дистрибутиве.
+        self.delete_preset_button.setEnabled(preset is not None and not preset.builtin)
+
+    def current_preset(self) -> Preset | None:
+        name = self.current_preset_name()
+        return next((p for p in self._presets if p.name == name), None)
