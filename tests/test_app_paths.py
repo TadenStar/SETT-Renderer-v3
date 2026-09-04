@@ -10,7 +10,7 @@ def test_dev_mode_finds_the_real_repo_root() -> None:
     assert not is_frozen()
     root = package_root()
     assert (root / "brm" / "scripts" / "probe_caps.py").is_file()
-    assert (root / "brm" / "resources" / "presets" / "balanced.json").is_file()
+    assert (root / "brm" / "resources" / "presets" / "super.json").is_file()
     assert (root / "brm.spec").is_file()
 
 

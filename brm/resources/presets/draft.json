@@ -2,13 +2,13 @@
  "schema_version": 1,
  "name": "Draft",
  "order": 10,
- "description": "Check animation, motion and timing in minutes, not quality. 50% resolution, JPEG, 20 s per frame limit.",
+ "description": "Speed first: half resolution, 64 samples cleaned by the GPU denoiser, simplified geometry and textures. For checking motion and timing, not the picture.",
  "engine": null,
  "output": {
   "file_format": "JPEG",
   "color_mode": "RGB",
   "quality": 90,
-  "resolution_percentage": 50
+  "resolution_scale": 0.5
  },
  "common": {
   "render.use_persistent_data": true,
@@ -19,10 +19,10 @@
  "cycles": {
   "cycles.use_adaptive_sampling": true,
   "cycles.adaptive_threshold": 0.05,
-  "cycles.samples": 128,
+  "cycles.samples": 64,
   "cycles.adaptive_min_samples": 0,
-  "cycles.time_limit": 20,
-  "cycles.use_denoising": false,
+  "cycles.time_limit": 0,
+  "cycles.use_denoising": true,
   "cycles.max_bounces": 4,
   "cycles.diffuse_bounces": 1,
   "cycles.glossy_bounces": 2,
@@ -39,7 +39,20 @@
   "cycles.volume_step_rate": 4.0,
   "cycles.volume_max_steps": 256,
   "cycles.volume_preview_step_rate": 8.0,
-  "cycles.texture_limit_render": "1024"
+  "cycles.texture_limit_render": "1024",
+  "cycles.denoiser": {
+   "prefer": [
+    "OPTIX",
+    "OPENIMAGEDENOISE"
+   ]
+  },
+  "cycles.denoising_input_passes": "RGB_ALBEDO_NORMAL",
+  "cycles.denoising_prefilter": "FAST",
+  "cycles.denoising_quality": "FAST",
+  "cycles.denoising_use_gpu": true,
+  "cycles.use_fast_gi": true,
+  "cycles.fast_gi_method": "ADD",
+  "cycles.ao_bounces_render": 2
  },
  "eevee": {
   "eevee.taa_render_samples": 16,

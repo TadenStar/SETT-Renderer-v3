@@ -44,7 +44,7 @@ class AppSettings(BaseModel):
     # Последние открытые .blend, новые в начале.
     recent_projects: list[str] = Field(default_factory=list)
     # Последний выбранный пресет рендера и кодека.
-    last_preset: str = "Balanced"
+    last_preset: str = "Draft"
     last_video_preset: str = "H.264"
     # Собирать видео сразу после успешного рендера (M6).
     auto_build_video: bool = False

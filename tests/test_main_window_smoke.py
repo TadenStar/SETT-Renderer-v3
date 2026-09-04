@@ -248,21 +248,21 @@ def test_settings_form_modes_and_values(qapp, fixtures_dir: Path) -> None:
     form = SettingsForm()
     chosen: list[str] = []
     form.preset_changed.connect(chosen.append)
-    form.set_presets(presets, "Balanced")
-    assert form.current_preset_name() == "Balanced" and chosen == []
+    form.set_presets(presets, "Super")
+    assert form.current_preset_name() == "Super" and chosen == []
     form.set_engine("CYCLES")
-    form.show_resolved(resolve_preset(presets[2], caps, "CYCLES"))
+    form.show_resolved(resolve_preset(presets[1], caps, "CYCLES"))  # Super
     rows = form.rows
-    assert rows["samples"].value() == 1024 and rows["denoise"].value() is True and rows["format"].value() == "PNG"
+    assert rows["samples"].value() == 512 and rows["denoise"].value() is True
     rows["samples"].set_mode(MODE_CUSTOM)
     rows["samples"].set_value(64)
     rows["persistent"].set_mode(MODE_SKIP)
     assert form.custom_values() == {"cycles.samples": 64} and form.untouched_paths() == {"render.use_persistent_data"}
     rows["samples"].set_mode(MODE_PRESET)
-    assert rows["samples"].value() == 1024
+    assert rows["samples"].value() == 512
     form.set_engine("BLENDER_EEVEE")
-    form.show_resolved(resolve_preset(presets[2], caps, "BLENDER_EEVEE"))
-    assert rows["samples"].value() == 64 and rows["threshold"].note.text() == "Cycles only"
+    form.show_resolved(resolve_preset(presets[1], caps, "BLENDER_EEVEE"))  # Super
+    assert rows["samples"].value() == 192 and rows["threshold"].note.text() == "Cycles only"
     form.preset_combo.setCurrentIndex(0)
     assert chosen == ["Draft"]
 
@@ -312,14 +312,13 @@ def test_render_job_gets_preset_overrides(qapp, settings_path: Path, fake_blende
     assert "stop here" in window.log_view.status_label.text()
 
     # Режимы полей переживают смену пресета: «не трогать» — выбор пользователя, а не пресета.
-    window.settings_form.preset_combo.setCurrentIndex(4)  # Heavy Scene: chunk 20 из пресета
+    window.settings_form.preset_combo.setCurrentIndex(1)  # Super
     window.start_render()
-    assert captured[-1].chunk_size == 20
     assert "render.use_persistent_data" not in captured[-1].overrides
 
     window.settings_form.rows["persistent"].set_mode(MODE_PRESET)
     window.start_render()
-    assert captured[-1].overrides["render.use_persistent_data"] is False  # Heavy Scene выключает
+    assert captured[-1].overrides["render.use_persistent_data"] is True  # Super его включает
     window.project_panel.chunk_spin.setValue(7)
     window.start_render()
     assert captured[-1].chunk_size == 7
@@ -384,12 +383,13 @@ def test_queue_runs_items_sequentially_and_persists(qapp, settings_path: Path, f
     load_project(qapp, window, blend_file)
     window.project_panel.resume_check.setChecked(False)
 
+    window.settings_form.preset_combo.setCurrentIndex(1)  # Super
     window.add_current_to_queue()
     window.settings_form.preset_combo.setCurrentIndex(0)  # Draft
     window.add_current_to_queue()
     assert window.queue_view.table.rowCount() == 2
     saved = QueueStore(queue_store.path).load()
-    assert [item.job.preset for item in saved.items] == ["Balanced", "Draft"]
+    assert [item.job.preset for item in saved.items] == ["Super", "Draft"]
     assert "2 pending" in window.queue_view.status_label.text()
 
     window.run_queue()
@@ -596,7 +596,7 @@ def test_display_modes_switch_which_form_feeds_overrides(
     qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path
 ) -> None:
     store = SettingsStore(settings_path)
-    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out"), last_preset="Balanced"))
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out"), last_preset="Super"))
     window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
     load_project(qapp, window, blend_file)
     form = window.settings_form
@@ -635,7 +635,7 @@ def test_expert_mode_overrides_reach_the_composed_job(
     from brm.ui.settings_form import VIEW_EXPERT
 
     store = SettingsStore(settings_path)
-    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out"), last_preset="Balanced"))
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out"), last_preset="Super"))
     window = MainWindow(store, capabilities_loader=caps_loader, project_loader=project_loader)
     load_project(qapp, window, blend_file)
 
@@ -673,7 +673,7 @@ def test_history_is_recorded_after_a_finished_render(
 
     entries = history_store.list_entries()
     assert len(entries) == 1
-    assert entries[0].status == "success" and entries[0].frames_done == 2 and entries[0].preset == "Balanced"
+    assert entries[0].status == "success" and entries[0].frames_done == 2 and entries[0].preset == "Draft"
     assert entries[0].scene == "Scene"
 
 
@@ -1005,10 +1005,11 @@ def test_an_8gb_card_gets_no_tuning_and_keeps_the_scene_tiles(
 def test_preset_no_longer_forces_resolution_or_format(
     qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
 ) -> None:
-    """Balanced не переписывает 50% и формат, выставленные в .blend."""
+    """Super не переписывает 50% и формат, выставленные в .blend."""
     window = _ready_window(
         qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
     )
+    window.settings_form.preset_combo.setCurrentIndex(1)  # Super
     job = window.compose_job()
     assert job is not None
     assert "render.resolution_percentage" not in job.overrides
@@ -1100,3 +1101,95 @@ def test_tiles_can_be_switched_off_from_the_simple_form(
 
     job = window.compose_job()
     assert job is not None and job.overrides["cycles.use_auto_tile"] is False
+
+
+# --- три пресета и свои сохранённые ------------------------------------------------
+
+
+def test_only_three_choices_are_offered(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Отзыв: «список пресетов включает огромное количество ненужных»."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    combo = window.settings_form.preset_combo
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
+
+
+def test_super_warns_that_a_frame_is_slow(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    form = window.settings_form
+    form.preset_combo.setCurrentIndex(0)  # Draft
+    assert form.warning_label.isHidden()
+
+    form.preset_combo.setCurrentIndex(1)  # Super
+    assert not form.warning_label.isHidden() and "20 s" in form.warning_label.text()
+
+
+def test_draft_halves_the_resolution_of_the_scene(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """В фикстуре сцена на 100%, значит Draft просит 50%."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    window.settings_form.preset_combo.setCurrentIndex(0)  # Draft
+    job = window.compose_job()
+    assert job is not None and job.overrides["render.resolution_percentage"] == 50
+
+
+def test_save_and_delete_your_own_preset_from_the_form(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+    from brm.ui import main_window as main_window_mod
+
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    monkeypatch.setattr(main_window_mod.QInputDialog, "getText", staticmethod(lambda *a, **k: ("Cave look", True)))
+    window.save_current_as_preset()
+
+    combo = window.settings_form.preset_combo
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super", "Cave look"]
+    assert combo.currentData() == "Cave look"
+    assert window.settings_form.delete_preset_button.isEnabled()  # своё удалять можно
+
+    monkeypatch.setattr(
+        main_window_mod.QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
+    window.delete_selected_preset()
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
+
+
+def test_builtin_presets_cannot_be_deleted(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    assert not window.settings_form.delete_preset_button.isEnabled()
+    window.delete_selected_preset()  # ничего не делает и не падает
+    combo = window.settings_form.preset_combo
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
+
+
+def test_saving_over_a_builtin_name_is_refused(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path, monkeypatch
+) -> None:
+    from brm.ui import main_window as main_window_mod
+
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    monkeypatch.setattr(main_window_mod.QInputDialog, "getText", staticmethod(lambda *a, **k: ("Super", True)))
+    window.save_current_as_preset()
+    assert "built-in" in window.log_view.status_label.text()
+    combo = window.settings_form.preset_combo
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
