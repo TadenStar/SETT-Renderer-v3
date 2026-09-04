@@ -40,6 +40,7 @@ def test_argv_full_canonical_order() -> None:
         scene="Scene",
         override_script=r"C:\tmp\_brm_override_x.py",
         threads=0,
+        file_format="PNG",
         cycles_device="OPTIX",
     )
     assert argv == [
@@ -74,7 +75,10 @@ def test_argv_full_canonical_order() -> None:
 
 def test_argv_minimal_without_cycles_section() -> None:
     argv = build_argv(BLENDER, BLEND, frames=[5], output_path=OUT)
-    assert argv == [BLENDER, "-b", BLEND, "-o", OUT, "-F", "PNG", "-x", "1", "--render-frame", "5"]
+    # Без file_format нет и -F: формат берётся из сцены, а не навязывается приложением.
+    assert argv == [BLENDER, "-b", BLEND, "-o", OUT, "-x", "1", "--render-frame", "5"]
+    with_format = build_argv(BLENDER, BLEND, frames=[5], output_path=OUT, file_format="JPEG")
+    assert with_format[4:7] == [OUT, "-F", "JPEG"]
     assert "--" not in argv
 
 

@@ -53,11 +53,9 @@ def test_resolve_engine_alias(caps: Capabilities) -> None:
 
 def test_balanced_for_cycles(caps: Capabilities, presets: dict[str, Preset]) -> None:
     resolved = resolve_preset(presets["Balanced"], caps, "CYCLES")
-    assert resolved.engine == "CYCLES" and resolved.file_format == "PNG"
-    assert resolved.assignments[0] == (FILE_FORMAT_PATH, "PNG")
+    assert resolved.engine == "CYCLES" and resolved.file_format is None  # формат из сцены
     values = resolved.as_dict()
-    assert values["render.image_settings.color_depth"] == "16"
-    assert values["render.image_settings.compression"] == 15
+    assert FILE_FORMAT_PATH not in values  # вывод остаётся таким, как настроен в .blend
     assert values["cycles.samples"] == 1024
     # prefer: в форме — первый статически доступный, в override — хвост списка с него.
     assert resolved.value("cycles.sampling_pattern") == "BLUE_NOISE"
@@ -90,17 +88,18 @@ def test_output_sections_per_format(caps: Capabilities, presets: dict[str, Prese
 
     final_resolved = resolve_preset(presets["Final"], caps, "CYCLES")
     final = final_resolved.as_dict()
-    # Статический список 5.0.1 ещё содержит OPEN_EXR_MULTILAYER, поэтому показываем его,
-    # а в override уходит список кандидатов: внутри Blender сработает запасной OPEN_EXR.
-    assert final_resolved.file_format == "OPEN_EXR_MULTILAYER"
-    assert final_resolved.value(FILE_FORMAT_PATH) == "OPEN_EXR_MULTILAYER"
-    assert final[FILE_FORMAT_PATH] == {"prefer": ["OPEN_EXR_MULTILAYER", "OPEN_EXR"]}
-    assert final["render.image_settings.exr_codec"] == "ZIP"
-    assert "render.image_settings.compression" not in final
-    assert display_file_format(final, "PNG") == "OPEN_EXR_MULTILAYER"
+    # Final больше не навязывает multilayer EXR: формат и его параметры — из сцены.
+    assert final_resolved.file_format is None
+    assert FILE_FORMAT_PATH not in final
+    assert not [key for key in final if key.startswith("render.image_settings.")]
+
+    # Формат в argv: у Balanced/Final его нет вовсе, у Draft — свой.
+    assert display_file_format(final, None) is None
+    assert display_file_format({FILE_FORMAT_PATH: "JPEG"}, None) == "JPEG"
     assert display_file_format({}, "PNG") == "PNG"
 
     social = resolve_preset(presets["Social 9:16"], caps, "CYCLES").as_dict()
+    assert social[FILE_FORMAT_PATH] == "PNG"
     assert (social["render.resolution_x"], social["render.resolution_y"], social["render.fps"]) == (1080, 1920, 30)
 
 
@@ -149,7 +148,7 @@ def test_compose_overrides(caps: Capabilities, presets: dict[str, Preset]) -> No
     assert overrides["cycles.samples"] == 64 and overrides["cycles.max_bounces"] == 3
     assert overrides["render.resolution_percentage"] == 25
     assert "render.use_persistent_data" not in overrides and "cycles.denoiser" not in overrides
-    assert list(overrides)[0] == FILE_FORMAT_PATH  # порядок: формат первым
+    assert FILE_FORMAT_PATH not in overrides  # Balanced формат не трогает
 
 
 def test_resolved_value_lookup(caps: Capabilities) -> None:

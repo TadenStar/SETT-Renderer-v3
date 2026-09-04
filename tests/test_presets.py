@@ -28,7 +28,6 @@ def test_builtin_presets_load_in_order(tmp_path: Path) -> None:
 def test_every_builtin_preset_has_both_engine_sections(tmp_path: Path) -> None:
     for preset in load_presets(user_dir=tmp_path / "none"):
         assert preset.cycles and preset.eevee, preset.name
-        assert preset.output.file_format, preset.name
         assert preset.description
         for path in (*preset.common, *preset.cycles, *preset.eevee, *preset.view_layer):
             assert "." in path and not path.startswith("scene."), f"{preset.name}: {path}"
@@ -42,13 +41,38 @@ def test_builtin_values_follow_the_settings_doc(tmp_path: Path) -> None:
     assert presets["Balanced"].cycles["cycles.samples"] == 1024
     assert presets["Balanced"].cycles["cycles.adaptive_min_samples"] == 32
     assert presets["Final"].cycles["cycles.adaptive_threshold"] == 0.005
-    assert presets["Final"].output.file_format == {"prefer": ["OPEN_EXR_MULTILAYER", "OPEN_EXR"]}
-    assert presets["Final"].view_layer["view_layer.cycles.denoising_store_passes"] is True
     assert presets["Heavy Scene"].common["render.use_persistent_data"] is False
     assert presets["Heavy Scene"].cycles["cycles.tile_size"] == 512 and presets["Heavy Scene"].chunk_size == 20
     assert presets["Anti-flicker"].cycles["cycles.use_animated_seed"] is False
     assert presets["Social 9:16"].output.resolution_x == 1080 and presets["Social 9:16"].output.fps == 30
     assert all(p.cycles["cycles.caustics_reflective"] is False for p in presets.values())
+
+
+def test_only_speed_and_delivery_presets_force_the_output_format(tmp_path: Path) -> None:
+    """Формат вывода — дело сцены, если пресет не про него.
+
+    Final раньше навязывал multilayer EXR с Cryptomatte, и на диск ложилось не то,
+    что художник настроил в файле. Формат остаётся только там, где он и есть смысл
+    пресета: Draft жмёт в JPEG ради скорости, Social отдаёт готовый PNG.
+    """
+    presets = {p.name: p for p in load_presets(user_dir=tmp_path / "none")}
+    assert presets["Draft"].output.file_format == "JPEG"
+    for name in ("Balanced", "Final", "Preview", "Anti-flicker", "Heavy Scene"):
+        assert presets[name].output.file_format is None, name
+        assert presets[name].output.resolution_percentage is None, name
+
+
+def test_presets_do_not_touch_tiles(tmp_path: Path) -> None:
+    """Тайлы задаёт сцена: понижение tile замедляло рендер (см. hardware_tuning).
+
+    Исключение — Heavy Scene, где мелкий тайл и есть смысл пресета.
+    """
+    for preset in load_presets(user_dir=tmp_path / "none"):
+        if preset.name == "Heavy Scene":
+            assert preset.cycles["cycles.tile_size"] == 512
+            continue
+        assert "cycles.tile_size" not in preset.cycles, preset.name
+        assert "cycles.use_auto_tile" not in preset.cycles, preset.name
 
 
 def test_user_preset_overrides_builtin_and_adds_new(tmp_path: Path) -> None:

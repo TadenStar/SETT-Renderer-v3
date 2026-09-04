@@ -6,8 +6,14 @@
 
 Два правила, из которых следует всё остальное.
 
-**Меняем только то, что не меняет картинку.** Tile size и Persistent Data — это
-раскладка памяти, пиксели на выходе те же. А ``texture_limit_render`` уменьшает
+**Не замедлять.** Первая версия понижала tile size под объём VRAM, и это оказалось
+ошибкой: кадр 1920x1920 целиком помещается в тайл 2048, а в 1024 бьётся на четыре
+куска, и замер на живом Blender дал +6.6% ко времени кадра на пустой сцене (на
+насыщенной больше). Пиксели при этом те же — но приложение не имеет права
+замедлять рендер ради страховки, которая на этой карте не нужна. Тайлы теперь
+не трогаются вовсе: их задаёт сцена или явный выбор пользователя.
+
+**Меняем только то, что не меняет картинку.** ``texture_limit_render`` уменьшает
 разрешение текстур, и документ о настройках предупреждает: «Для крупных планов —
 не трогать». Тихо ужать текстуры на пресете Final значит отдать клиенту не тот
 рендер, который заказывали, поэтому texture limit сюда не входит. Он остаётся
@@ -15,8 +21,8 @@
 упавший рендер.
 
 **Только урезаем, никогда не поднимаем.** Спека: «Дефолты должны быть безопасны
-по VRAM и RAM. Никаких предположений о рендер-ферме». Поднять tile size на
-большой карте — значит спорить с автором пресета: у Heavy Scene tile 512 стоит
+по VRAM и RAM. Никаких предположений о рендер-ферме». Включить обратно то, что
+автор пресета выключил осознанно, нельзя: у Heavy Scene Persistent Data выключен
 не от бедности железа, а потому что сцена тяжёлая. Отсюда же идемпотентность:
 подстроенный пресет, поданный второй раз, не меняется.
 
@@ -32,8 +38,6 @@ from typing import Any
 from brm.core.hardware import HardwareInfo, round_gb
 from brm.core.presets import Preset
 
-TILE_SIZE = "cycles.tile_size"
-USE_AUTO_TILE = "cycles.use_auto_tile"
 DENOISING_USE_GPU = "cycles.denoising_use_gpu"
 PERSISTENT_DATA = "render.use_persistent_data"
 
@@ -44,10 +48,9 @@ MIN_RAM_GB_FOR_PERSISTENT_DATA = 16
 
 @dataclass(frozen=True)
 class VramTier:
-    """Потолки для класса карт. ``None`` — свойство не трогаем."""
+    """Что урезаем на картах этого класса."""
 
     max_gb: int | None
-    tile_size: int | None = None
     denoise_on_cpu: bool = False
 
 
@@ -55,9 +58,8 @@ class VramTier:
 # заметную VRAM сверх рендера (документ о настройках, раздел 4), поэтому на
 # совсем маленьких картах он уходит на CPU: сам алгоритм OIDN тот же.
 VRAM_TIERS: tuple[VramTier, ...] = (
-    VramTier(max_gb=7, tile_size=512, denoise_on_cpu=True),
-    VramTier(max_gb=11, tile_size=1024),
-    # 12 ГБ и больше: пресет и так безопасен, урезать нечего.
+    VramTier(max_gb=7, denoise_on_cpu=True),
+    # 8 ГБ и больше: трогать нечего. Тайлы не наш вопрос — см. заголовок модуля.
     VramTier(max_gb=None),
 )
 
@@ -105,14 +107,6 @@ def tune_preset(preset: Preset, hardware: HardwareInfo, engine: str | None = Non
         vram_gb = round_gb(hardware.vram_mb)
         tier = tier_for_vram(vram_gb)
         source = f"{vram_gb} GB VRAM"
-
-        current_tile = cycles.get(TILE_SIZE)
-        if tier.tile_size is not None and (current_tile is None or int(current_tile) > tier.tile_size):
-            apply(cycles, TILE_SIZE, tier.tile_size, f"tile size {tier.tile_size} ({source})")
-            # Размер тайла без auto tile ни на что не влияет.
-            if not cycles.get(USE_AUTO_TILE):
-                cycles[USE_AUTO_TILE] = True
-                changes[USE_AUTO_TILE] = True
 
         if tier.denoise_on_cpu and cycles.get(DENOISING_USE_GPU) is not False:
             apply(cycles, DENOISING_USE_GPU, False, f"denoising on CPU ({source})")

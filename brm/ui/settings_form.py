@@ -77,6 +77,7 @@ PARAMS: tuple[ParamSpec, ...] = (
     ParamSpec("time_limit", "Time limit per frame, s", "cycles.time_limit", None, "int", 0, 86400),
     ParamSpec("resolution", "Resolution %", "render.resolution_percentage", "render.resolution_percentage", "int", 1, 400),
     ParamSpec("persistent", "Persistent Data", "render.use_persistent_data", "render.use_persistent_data", "bool"),
+    ParamSpec("tiles", "Tile rendering", "cycles.use_auto_tile", None, "bool"),
     ParamSpec("format", "File format", FILE_FORMAT_PATH, FILE_FORMAT_PATH, "enum", choices=DEFAULT_FORMATS),
 )
 

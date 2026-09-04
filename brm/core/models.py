@@ -31,7 +31,9 @@ class RenderJob(BaseModel):
     # Движок и устройство: None — как в файле / лучшее доступное из capabilities.
     engine: str | None = None
     cycles_device: str | None = None
-    file_format: str = "PNG"
+    # None — формат берётся из сцены (-F не передаётся). Строка только когда
+    # пользователь или пресет выбрали формат осознанно.
+    file_format: str | None = None
     threads: int | None = None
     factory_startup: bool = False
     # Присваивания RNA-свойств для override.py: «scene.cycles.samples» → 128.

@@ -20,8 +20,6 @@ from brm.core.hardware import (
 from brm.core.hardware_tuning import (
     DENOISING_USE_GPU,
     PERSISTENT_DATA,
-    TILE_SIZE,
-    USE_AUTO_TILE,
     tier_for_vram,
     tune_preset,
 )
@@ -135,38 +133,52 @@ def cycles_preset(**cycles) -> Preset:
 
 
 @pytest.mark.parametrize(
-    "vram_gb, expected_tile",
-    [(4, 512), (7, 512), (8, 1024), (11, 1024), (12, None), (16, None), (24, None)],
+    "vram_gb, denoise_on_cpu",
+    [(4, True), (7, True), (8, False), (12, False), (24, False)],
 )
-def test_vram_tiers(vram_gb: int, expected_tile: int | None) -> None:
-    assert tier_for_vram(vram_gb).tile_size == expected_tile
+def test_vram_tiers(vram_gb: int, denoise_on_cpu: bool) -> None:
+    assert tier_for_vram(vram_gb).denoise_on_cpu is denoise_on_cpu
 
 
-def test_tuning_lowers_the_tile_and_enables_auto_tile() -> None:
-    result = tune_preset(cycles_preset(**{TILE_SIZE: 2048}), HardwareInfo(vram_mb=8151))
-    assert result.preset.cycles[TILE_SIZE] == 1024
-    assert result.preset.cycles[USE_AUTO_TILE] is True  # без auto tile размер не работает
-    assert result.notes == ["tile size 1024 (8 GB VRAM)"]
+def test_tuning_never_touches_tiles() -> None:
+    """Регрессия: понижение tile под VRAM замедляло рендер.
+
+    Кадр 1920x1920 влезает в тайл 2048 целиком, а в 1024 бьётся на четыре куска
+    и считается на 6.6% дольше (замер на живом Blender). Тайлы задаёт сцена
+    или пользователь, подстройка под железо в это не лезет.
+    """
+    preset = cycles_preset(**{"cycles.tile_size": 2048, "cycles.use_auto_tile": True})
+    for vram_mb in (2048, 4096, 8151, 12288, 24576):
+        result = tune_preset(preset, HardwareInfo(vram_mb=vram_mb, ram_mb=8192))
+        assert "cycles.tile_size" not in result.changes
+        assert "cycles.use_auto_tile" not in result.changes
+        assert result.preset.cycles["cycles.tile_size"] == 2048
 
 
-def test_tuning_never_raises_a_tighter_preset() -> None:
-    """Heavy Scene ставит tile 512 осознанно — на 8 ГБ его нельзя «улучшать» до 1024."""
-    preset = cycles_preset(**{TILE_SIZE: 512, USE_AUTO_TILE: True})
-    result = tune_preset(preset, HardwareInfo(vram_mb=8151, ram_mb=32189))
+def test_tuning_never_undoes_a_tighter_preset() -> None:
+    """Heavy Scene гасит Persistent Data осознанно — включать обратно нельзя."""
+    preset = Preset(name="T", cycles={DENOISING_USE_GPU: False}, common={PERSISTENT_DATA: False})
+    result = tune_preset(preset, HardwareInfo(vram_mb=4096, ram_mb=8192))
     assert not result.changed() and result.preset is preset
 
 
 def test_tuning_is_idempotent() -> None:
     hardware = HardwareInfo(vram_mb=4096, ram_mb=8192)
-    once = tune_preset(cycles_preset(**{TILE_SIZE: 2048}), hardware)
+    once = tune_preset(cycles_preset(**{DENOISING_USE_GPU: True}), hardware)
     twice = tune_preset(once.preset, hardware)
     assert once.changed() and not twice.changed()
 
 
-def test_small_card_also_moves_denoising_to_cpu() -> None:
-    result = tune_preset(cycles_preset(**{TILE_SIZE: 2048, DENOISING_USE_GPU: True}), HardwareInfo(vram_mb=4096))
+def test_small_card_moves_denoising_to_cpu() -> None:
+    result = tune_preset(cycles_preset(**{DENOISING_USE_GPU: True}), HardwareInfo(vram_mb=4096))
     assert result.preset.cycles[DENOISING_USE_GPU] is False
     assert "denoising on CPU (4 GB VRAM)" in result.notes
+
+
+def test_an_8gb_card_needs_no_tuning() -> None:
+    """Целевой ноутбук из спеки: подстройка не должна на нём ничего менять."""
+    result = tune_preset(cycles_preset(**{DENOISING_USE_GPU: True}), HardwareInfo(vram_mb=8151, ram_mb=32189))
+    assert not result.changed()
 
 
 def test_persistent_data_follows_ram_not_vram() -> None:
@@ -177,34 +189,34 @@ def test_persistent_data_follows_ram_not_vram() -> None:
 
 
 def test_unknown_hardware_changes_nothing() -> None:
-    preset = cycles_preset(**{TILE_SIZE: 2048})
+    preset = cycles_preset(**{DENOISING_USE_GPU: True})
     result = tune_preset(preset, HardwareInfo())
     assert not result.changed() and result.preset is preset
 
 
 def test_eevee_scene_keeps_the_cycles_section_alone() -> None:
-    """На EEVEE секция Cycles не применяется — обещать урезание тайлов нечестно."""
-    preset = cycles_preset(**{TILE_SIZE: 2048})
-    result = tune_preset(preset, HardwareInfo(vram_mb=8151), engine="BLENDER_EEVEE")
+    """На EEVEE секция Cycles не применяется — обещать урезание там нечестно."""
+    preset = cycles_preset(**{DENOISING_USE_GPU: True})
+    result = tune_preset(preset, HardwareInfo(vram_mb=4096), engine="BLENDER_EEVEE")
     assert not result.changed()
-    ram_only = tune_preset(preset, HardwareInfo(vram_mb=8151, ram_mb=8192), engine="BLENDER_EEVEE")
+    ram_only = tune_preset(preset, HardwareInfo(vram_mb=4096, ram_mb=8192), engine="BLENDER_EEVEE")
     assert list(ram_only.changes) == [PERSISTENT_DATA]  # Persistent Data не зависит от движка
 
 
 def test_tuning_never_touches_the_rendered_image() -> None:
-    """Проактивная подстройка меняет только раскладку памяти.
+    """Подстройка не меняет то, что видно на кадре.
 
-    ``texture_limit_render`` уменьшает разрешение текстур и виден на картинке —
-    ему место в лестнице ретраев после OOM, а не в тихой подстройке под железо.
+    ``texture_limit_render`` уменьшает разрешение текстур — ему место в лестнице
+    ретраев после OOM, а не в тихой подстройке под железо.
     """
     image_changing = {"cycles.texture_limit_render", "render.use_simplify", "cycles.samples"}
     for vram_mb in (2048, 4096, 8151, 12288, 24576):
-        result = tune_preset(cycles_preset(**{TILE_SIZE: 4096}), HardwareInfo(vram_mb=vram_mb, ram_mb=8192))
+        result = tune_preset(cycles_preset(**{DENOISING_USE_GPU: True}), HardwareInfo(vram_mb=vram_mb, ram_mb=8192))
         assert not (set(result.changes) & image_changing), result.changes
 
 
 def test_tuned_properties_stay_in_sync_with_the_oom_ladder() -> None:
     """Проактивная подстройка и ретрай после OOM обязаны крутить одни и те же ручки."""
     ladder = {path for _, step in OOM_RETRY_STEPS for path in step}
-    result = tune_preset(cycles_preset(**{TILE_SIZE: 4096}), HardwareInfo(vram_mb=2048, ram_mb=8192))
+    result = tune_preset(cycles_preset(**{DENOISING_USE_GPU: True}), HardwareInfo(vram_mb=2048, ram_mb=8192))
     assert set(result.changes) <= ladder

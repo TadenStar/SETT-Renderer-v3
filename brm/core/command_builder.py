@@ -3,7 +3,7 @@
 Каноническая форма:
     blender -b [--factory-startup] file.blend [-S Scene]
             [--python-exit-code 1 --python override.py]
-            -o out/#### -F PNG -x 1 [-t N]
+            -o out/#### [-F PNG] -x 1 [-t N]
             (-s A -e B [-j S] -a | --render-frame 1,5,10..20)
             [-- --cycles-device OPTIX --cycles-print-stats]
 """
@@ -41,7 +41,7 @@ def build_argv(
     output_path: str | os.PathLike[str],
     scene: str | None = None,
     override_script: str | os.PathLike[str] | None = None,
-    file_format: str = "PNG",
+    file_format: str | None = None,
     threads: int | None = None,
     factory_startup: bool = False,
     cycles_device: str | None = None,
@@ -57,7 +57,13 @@ def build_argv(
     if override_script is not None:
         # Если override упал, Blender не должен молча рендерить с чужими настройками.
         argv += ["--python-exit-code", "1", "--python", str(override_script)]
-    argv += ["-o", str(output_path), "-F", file_format, "-x", "1"]
+    argv += ["-o", str(output_path)]
+    # Без -F Blender берёт формат из сцены. Навязывать свой можно только
+    # по явному выбору: иначе приложение переписывает то, что художник
+    # настроил в файле, включая вывод композитора.
+    if file_format:
+        argv += ["-F", file_format]
+    argv += ["-x", "1"]
     if threads is not None:
         argv += ["-t", str(threads)]
     argv += frame_args(frames)
