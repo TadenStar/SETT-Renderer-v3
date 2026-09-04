@@ -55,6 +55,7 @@ def blend_paths_from_mime(mime) -> list[str]:
 class ProjectPanel(QGroupBox):
     file_requested = Signal(str)
     safety_requested = Signal()
+    analysis_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Project", parent)
@@ -167,6 +168,11 @@ class ProjectPanel(QGroupBox):
             "Frames per Blender process. Memory leaks do not pile up and a crash costs one chunk, "
             "at the price of rebuilding the BVH per chunk. 'preset' takes the value from the preset"
         )
+        self.analyze_button = QPushButton("Analyze…", self)
+        self.analyze_button.setToolTip("Count objects, triangles and instances in this scene")
+        self.analyze_button.clicked.connect(self.analysis_requested)
+        self.analyze_button.setEnabled(False)
+
         self.safety_button = QPushButton("Safety…", self)
         self.safety_button.setToolTip("Skipping finished frames, minimum frame size and chunk size")
         self.safety_button.clicked.connect(self.safety_requested)
@@ -198,6 +204,7 @@ class ProjectPanel(QGroupBox):
         form.addRow("", self.output_preview)
         self.form.setEnabled(False)
 
+        file_row.addWidget(self.analyze_button)
         file_row.addWidget(self.safety_button)
 
         layout = QVBoxLayout(self)
@@ -229,12 +236,14 @@ class ProjectPanel(QGroupBox):
         set_role(self.summary_label, "muted")
         self.warnings_label.hide()
         self.form.setEnabled(False)
+        self.analyze_button.setEnabled(False)
 
     def set_error(self, message: str) -> None:
         self.summary_label.setText(message)
         set_role(self.summary_label, "error")
         self.warnings_label.hide()
         self.form.setEnabled(False)
+        self.analyze_button.setEnabled(False)
 
     def set_project(self, info: ProjectInfo, warnings: list[str]) -> None:
         self._info = info
@@ -256,6 +265,7 @@ class ProjectPanel(QGroupBox):
         self.scene_combo.blockSignals(False)
         self._on_scene_changed(self.scene_combo.currentText())
         self.form.setEnabled(bool(info.scenes))
+        self.analyze_button.setEnabled(bool(info.scenes))
 
     def current_job(self) -> RenderJob | None:
         """Задача из текущих значений виджетов; None, если проект не загружен."""

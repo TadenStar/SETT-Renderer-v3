@@ -69,9 +69,11 @@ from brm.core.project_probe import ProjectInfo, probe_project, project_warnings
 from brm.core.queue import QueueStore, RenderQueue
 from brm.core.render_plan import RenderPlan, resolve_output_path
 from brm.core.render_stats import diagnose_failure, format_duration
+from brm.core.scene_stats import SceneStats, analyze_scene
 from brm.core.storage import AppSettings, SettingsStore, cache_dir, tmp_dir, with_recent_project
 from brm.core.system_actions import SHUTDOWN_DELAY_S, cancel_shutdown, schedule_shutdown
 from brm.core.video_runner import VIDEO_SUCCESS, VideoProcess, describe_result
+from brm.ui.analysis_dialog import AnalysisDialog
 from brm.ui.banner import WarningBanner
 from brm.ui.expert_window import ExpertWindow
 from brm.ui.history_dialog import HistoryDialog
@@ -161,6 +163,8 @@ class MainWindow(QMainWindow):
         self._safety_dialog: SafetyDialog | None = None
         self._expert_window: ExpertWindow | None = None
         self._video_dialog: VideoDialog | None = None
+        self._analysis_dialog: AnalysisDialog | None = None
+        self._analysis_task: FunctionTask | None = None
 
         self.presets: list[Preset] = load_presets()
         self.resolved_preset: ResolvedPreset | None = None
@@ -193,6 +197,8 @@ class MainWindow(QMainWindow):
         self.settings_form.save_preset_requested.connect(self.save_current_as_preset)
         self.settings_form.delete_preset_requested.connect(self.delete_selected_preset)
         self.settings_form.expert_requested.connect(self.show_expert_settings)
+        self.settings_form.set_compute_mode(self.settings.compute_mode)
+        self.settings_form.compute_changed.connect(self._on_compute_mode_changed)
         self.project_panel.scene_combo.currentTextChanged.connect(lambda _name: self.refresh_resolved_preset())
         self.queue_view.set_items(self.queue.items)
         self.video_panel.set_presets(self.video_presets, self.settings.last_video_preset)
@@ -297,6 +303,7 @@ class MainWindow(QMainWindow):
         self.project_panel = ProjectPanel()
         self.project_panel.file_requested.connect(self.open_project)
         self.project_panel.safety_requested.connect(self.show_safety)
+        self.project_panel.analysis_requested.connect(self.analyze_scene)
         self.settings_form = SettingsForm()
         self.progress_panel = ProgressPanel()
         self.log_view = LogView()
@@ -438,6 +445,54 @@ class MainWindow(QMainWindow):
             self.settings = self.settings.model_copy(update={"last_preset": name})
             self._store.save(self.settings)
         self.refresh_resolved_preset()
+
+    # --- анализ сцены ----------------------------------------------------------------
+
+    def _on_compute_mode_changed(self, mode: str) -> None:
+        self.settings.compute_mode = mode
+        self._store.save(self.settings)
+
+    def analyze_scene(self) -> None:
+        """Пересчёт геометрии — отдельная проба Blender, поэтому в фоне и по кнопке."""
+        if self.project is None or self.capabilities is None:
+            return
+        if self._analysis_dialog is None:
+            self._analysis_dialog = AnalysisDialog(self)
+        scene = self.project_panel.scene_combo.currentText()
+        self._analysis_dialog.set_running(Path(self.project.file_path).name)
+        self._analysis_dialog.show()
+        self._analysis_dialog.raise_()
+        if self._analysis_task is not None:
+            self._analysis_task.cancel.set()
+        task = FunctionTask(
+            analyze_scene,
+            self.capabilities.blender_path,
+            self.project.file_path,
+            scene=scene,
+            tmp_dir=tmp_dir(),
+        )
+        task.signals.finished.connect(lambda stats, t=task: self._on_analysis(t, stats))
+        task.signals.failed.connect(lambda message, t=task: self._on_analysis_failed(t, message))
+        self._analysis_task = task
+        self._begin_task("Analyzing the scene…")
+        task.start()
+
+    def _on_analysis(self, task: FunctionTask, stats: SceneStats) -> None:
+        if task is not self._analysis_task:
+            return
+        self._analysis_task = None
+        self._end_task()
+        if self._analysis_dialog is not None:
+            self._analysis_dialog.set_stats(stats)
+        self.log_view.append_line(f"[BRM] scene analysis: {stats.summary()}")
+
+    def _on_analysis_failed(self, task: FunctionTask, message: str) -> None:
+        if task is not self._analysis_task:
+            return
+        self._analysis_task = None
+        self._end_task()
+        if self._analysis_dialog is not None:
+            self._analysis_dialog.set_error(message)
 
     # --- окна, вынесенные с главного экрана -----------------------------------------
 
@@ -654,6 +709,8 @@ class MainWindow(QMainWindow):
         chunk_size = job.chunk_size if job.chunk_size is not None else resolved.preset.chunk_size
         return job.model_copy(
             update={
+                "compute_mode": self.settings_form.compute_mode(),
+                "camera_cull": self.settings_form.camera_culling(),
                 "overrides": overrides,
                 "preset": resolved.preset.name,
                 "engine": resolved.engine if resolved.preset.engine else None,

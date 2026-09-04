@@ -351,3 +351,79 @@ def test_the_app_does_not_slow_the_render_down(real_blender: str, tiny_blend: Pa
     for path in unwanted:
         assert not [line for line in brm if path in line], (path, brm)
     assert (plan.output_dir / "0001.png").is_file()
+
+
+def test_camera_culling_reaches_the_objects(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Галка на сцене ничего не режет: Cycles смотрит на флаг у каждого объекта.
+
+    Проверяем, что override включает его на объектах в памяти процесса и
+    Blender это подтверждает, а исходный .blend остаётся нетронутым.
+    """
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+    before = tiny_blend.stat().st_mtime_ns
+
+    job = RenderJob(
+        blend_path=str(tiny_blend),
+        engine="CYCLES",
+        camera_cull=True,
+        frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
+        overrides={
+            "cycles.samples": 4,
+            "cycles.use_camera_cull": True,
+            "cycles.camera_cull_margin": 0.1,
+            "render.resolution_x": 96,
+            "render.resolution_y": 64,
+        },
+    )
+    plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path / "out")), info, tmp_dir=tmp_path / "tmp")
+    assert plan.override_settings["camera_cull_objects"] is True
+    result = run_blender(plan.argv[0], plan.argv[1:], timeout=600)
+    assert result.ok, result.tail(60)
+
+    brm = result.brm_lines()
+    assert not [line for line in brm if line.startswith("[BRM] FAIL")], brm
+    assert "[BRM] OK   cycles.use_camera_cull = True" in brm
+    assert any("camera cull enabled on" in line and "0 object(s)" not in line for line in brm), brm
+    assert (plan.output_dir / "0001.png").is_file()
+    assert tiny_blend.stat().st_mtime_ns == before  # исходный файл не изменился
+
+
+def test_compute_modes_reach_blender(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """GPU по умолчанию, CPU и «GPU + CPU» — по явному выбору."""
+    from brm.core.capabilities import COMPUTE_CPU, COMPUTE_GPU_CPU, device_for_mode
+
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
+
+    for mode in (COMPUTE_CPU, COMPUTE_GPU_CPU):
+        expected_device, expected_cpu = device_for_mode(mode, caps)
+        job = RenderJob(
+            blend_path=str(tiny_blend),
+            engine="CYCLES",
+            compute_mode=mode,
+            frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
+            overrides={"cycles.samples": 4, "render.resolution_x": 64, "render.resolution_y": 64},
+            output_template="{output_dir}/%s/####" % mode,
+        )
+        plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path / "out")), info, tmp_dir=tmp_path / "tmp")
+        assert plan.cycles_device == expected_device
+        assert plan.override_settings["cycles_use_cpu"] is expected_cpu
+        result = run_blender(plan.argv[0], plan.argv[1:], timeout=600)
+        assert result.ok, result.tail(60)
+        brm = result.brm_lines()
+        assert not [line for line in brm if line.startswith("[BRM] FAIL")], brm
+        device_line = next((line for line in brm if "scene.cycles.device" in line), "")
+        assert ("CPU" if mode == COMPUTE_CPU else "GPU") in device_line, brm
+        assert (plan.output_dir / "0001.png").is_file()
+
+
+def test_scene_analysis_on_a_real_file(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Анализ считает объекты, треугольники и инстансы настоящей сцены."""
+    from brm.core.scene_stats import analyze_scene
+
+    stats = analyze_scene(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=300)
+    assert stats.objects >= 1 and stats.triangles > 0
+    assert stats.evaluated_objects >= 1 and stats.instances >= 0
+    assert "MESH" in stats.objects_by_type
+    assert "objects" in stats.summary() and "triangles" in stats.summary()

@@ -133,3 +133,39 @@ def test_unique_log_path_falls_back_to_random_suffix(tmp_path: Path) -> None:
         (tmp_path / f"{stem}_{attempt}.txt").write_text("x")
     path = unique_log_path(tmp_path, now)
     assert not path.exists() and path.name.startswith(stem)
+
+
+def test_compute_mode_reaches_the_plan_and_the_override(caps, project, tmp_path: Path) -> None:
+    """GPU + CPU: тип устройства берётся лучший, а CPU включается в помощь."""
+    from brm.core.capabilities import COMPUTE_CPU, COMPUTE_GPU_CPU
+
+    job = RenderJob(blend_path=r"D:\shots\a.blend", engine="CYCLES", compute_mode=COMPUTE_GPU_CPU)
+    plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path)), project, tmp_dir=tmp_path / "tmp")
+    assert plan.cycles_device == "OPTIX"
+    assert plan.override_settings["cycles_use_cpu"] is True
+    assert plan.argv[plan.argv.index("--cycles-device") + 1] == "OPTIX"
+
+    cpu_job = job.model_copy(update={"compute_mode": COMPUTE_CPU})
+    cpu_plan = build_render_plan(cpu_job, caps, AppSettings(default_output_dir=str(tmp_path)), project, tmp_dir=tmp_path / "tmp")
+    assert cpu_plan.cycles_device == "CPU" and cpu_plan.override_settings["cycles_use_cpu"] is False
+
+
+def test_explicit_device_beats_the_mode(caps, project, tmp_path: Path) -> None:
+    """Тип, выбранный в задаче явно, важнее общего режима."""
+    from brm.core.capabilities import COMPUTE_GPU
+
+    job = RenderJob(blend_path=r"D:\shots\a.blend", engine="CYCLES", compute_mode=COMPUTE_GPU, cycles_device="CUDA")
+    plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path)), project, tmp_dir=tmp_path / "tmp")
+    assert plan.cycles_device == "CUDA"
+
+
+def test_camera_cull_only_applies_to_cycles(caps, project, tmp_path: Path) -> None:
+    """На EEVEE отсечение по камере не существует — не обещаем того, чего нет."""
+    settings = AppSettings(default_output_dir=str(tmp_path))
+    cycles = RenderJob(blend_path=r"D:\shots\a.blend", engine="CYCLES", camera_cull=True)
+    eevee = RenderJob(blend_path=r"D:\shots\a.blend", engine="BLENDER_EEVEE", camera_cull=True)
+    off = RenderJob(blend_path=r"D:\shots\a.blend", engine="CYCLES", camera_cull=False)
+
+    for job, expected in ((cycles, True), (eevee, False), (off, False)):
+        plan = build_render_plan(job, caps, settings, project, tmp_dir=tmp_path / "tmp")
+        assert plan.override_settings["camera_cull_objects"] is expected
