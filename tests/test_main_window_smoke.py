@@ -938,6 +938,7 @@ def test_preview_without_frames_says_so(
     assert preview.caption.text() == EMPTY_TEXT
 
 
+
 # --- подстройка пресета под железо ---------------------------------------------
 
 
@@ -978,23 +979,55 @@ def _ready_window(qapp, store, caps_loader, project_loader, blend_file: Path, de
     return window
 
 
-def test_tuning_lowers_the_tile_on_an_8gb_card(
+def test_an_8gb_card_gets_no_tuning_and_keeps_the_scene_tiles(
     qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
 ) -> None:
-    """Balanced просит tile 2048, а карта на 8 ГБ — в форме и в задаче должно быть 1024."""
+    """Регрессия скорости: приложение не должно трогать тайлы на целевом ноутбуке.
+
+    Раньше подстройка понижала tile до 1024, кадр 1920x1920 бился на четыре куска
+    и считался дольше. Теперь пресет тайлы не задаёт, а подстройка их не трогает.
+    """
     window = _ready_window(
         qapp, configured_store, caps_loader, cycles_project_loader, blend_file,
         _hardware(gpu_name="NVIDIA GeForce RTX 5070 Laptop GPU", vram_mb=8151, ram_mb=32189, cpu_threads=24),
     )
-    assert window.resolved_preset is not None
-    assert window.resolved_preset.value("cycles.tile_size") == 1024
-    assert window.tuning is not None and window.tuning.notes == ["tile size 1024 (8 GB VRAM)"]
-
-    label = window.settings_form.tuning_label
-    assert not label.isHidden() and "tile size 1024" in label.text() and "8 GB VRAM" in label.text()
+    assert window.tuning is not None and not window.tuning.changed()
 
     job = window.compose_job()
-    assert job is not None and job.overrides["cycles.tile_size"] == 1024
+    assert job is not None
+    assert "cycles.tile_size" not in job.overrides
+    assert "cycles.use_auto_tile" not in job.overrides
+
+    label = window.settings_form.tuning_label
+    assert not label.isHidden() and "preset already fits" in label.text()
+
+
+def test_preset_no_longer_forces_resolution_or_format(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Balanced не переписывает 50% и формат, выставленные в .blend."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    job = window.compose_job()
+    assert job is not None
+    assert "render.resolution_percentage" not in job.overrides
+    assert "render.image_settings.file_format" not in job.overrides
+    assert job.file_format is None  # -F не передаётся, формат берёт Blender из сцены
+
+
+def test_small_card_still_gets_protection(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """На слабой машине подстройка по-прежнему нужна — но без тайлов."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=4096, ram_mb=8192)
+    )
+    job = window.compose_job()
+    assert job is not None
+    assert job.overrides["cycles.denoising_use_gpu"] is False
+    assert job.overrides["render.use_persistent_data"] is False
+    assert "cycles.tile_size" not in job.overrides
 
 
 def test_tuning_off_keeps_the_preset_as_written(
@@ -1003,12 +1036,12 @@ def test_tuning_off_keeps_the_preset_as_written(
     store = SettingsStore(settings_path)
     store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=r"D:\out"))
     window = _ready_window(
-        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=4096, ram_mb=8192)
     )
-    assert window.resolved_preset.value("cycles.tile_size") == 1024
+    assert window.resolved_preset.value("cycles.denoising_use_gpu") is False
 
     window.settings_form.tune_check.setChecked(False)
-    assert window.resolved_preset.value("cycles.tile_size") == 2048
+    assert window.resolved_preset.value("cycles.denoising_use_gpu") is True
     assert window.tuning is None
     assert window.settings_form.tuning_label.isHidden()
     assert store.load().tune_for_hardware is False  # выбор переживёт перезапуск
@@ -1018,7 +1051,6 @@ def test_unknown_hardware_changes_nothing_in_the_ui(
     qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
 ) -> None:
     window = _ready_window(qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware())
-    assert window.resolved_preset.value("cycles.tile_size") == 2048
     assert window.tuning is None
     assert "Hardware unknown" in window.settings_form.tuning_label.text()
 
@@ -1033,37 +1065,38 @@ def test_hardware_probe_failure_is_not_fatal(
 
     window = _ready_window(qapp, configured_store, caps_loader, cycles_project_loader, blend_file, broken)
     assert window.hardware.vram_mb is None
-    assert window.resolved_preset.value("cycles.tile_size") == 2048
     assert window.render_button.isEnabled()
     assert any("nvidia-smi exploded" in line for line in window.log_view.lines())
-
-
-def test_small_card_also_drops_persistent_data(
-    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
-) -> None:
-    window = _ready_window(
-        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=4096, ram_mb=8192)
-    )
-    job = window.compose_job()
-    assert job is not None
-    assert job.overrides["cycles.tile_size"] == 512
-    assert job.overrides["cycles.denoising_use_gpu"] is False
-    assert job.overrides["render.use_persistent_data"] is False
 
 
 def test_custom_value_beats_hardware_tuning(
     qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
 ) -> None:
     """Явно выставленное пользователем значение важнее автоматики."""
+    from brm.ui.settings_form import VIEW_EXPERT
+
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=4096, ram_mb=8192)
+    )
+    window.settings_form.set_display_mode(VIEW_EXPERT)
+    row = window.settings_form.expert_form.rows["cycles.denoising_use_gpu"]
+    row.set_mode(MODE_CUSTOM)
+    row.set_value(True)
+
+    job = window.compose_job()
+    assert job is not None and job.overrides["cycles.denoising_use_gpu"] is True
+
+
+def test_tiles_can_be_switched_off_from_the_simple_form(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Отзыв с реальной задачи: «не нашёл, где отключить рендер по тайлам»."""
     window = _ready_window(
         qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
     )
-    from brm.ui.settings_form import VIEW_EXPERT
-
-    window.settings_form.set_display_mode(VIEW_EXPERT)
-    row = window.settings_form.expert_form.rows["cycles.tile_size"]
+    row = window.settings_form.rows["tiles"]
     row.set_mode(MODE_CUSTOM)
-    row.set_value(256)
+    row.set_value(False)
 
     job = window.compose_job()
-    assert job is not None and job.overrides["cycles.tile_size"] == 256
+    assert job is not None and job.overrides["cycles.use_auto_tile"] is False

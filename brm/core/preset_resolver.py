@@ -179,8 +179,8 @@ def compose_overrides(
     return result
 
 
-def display_file_format(overrides: dict[str, Any], fallback: str) -> str:
-    """Формат для ``-F``: строка или первый кандидат prefer."""
+def display_file_format(overrides: dict[str, Any], fallback: str | None) -> str | None:
+    """Формат для ``-F``: строка, первый кандидат prefer или None — «из сцены»."""
     value = overrides.get(FILE_FORMAT_PATH)
     if is_prefer(value):
         candidates = value[PREFER_KEY]

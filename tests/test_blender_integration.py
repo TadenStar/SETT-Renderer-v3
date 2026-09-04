@@ -162,7 +162,7 @@ def test_presets_draft_and_final_change_the_render(real_blender: str, tiny_blend
             blend_path=str(tiny_blend),
             engine="CYCLES",
             preset=name,
-            file_format=resolved.file_format or "PNG",
+            file_format=resolved.file_format,
             frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
             overrides=overrides,
             output_template="{output_dir}/{preset}/####",
@@ -180,13 +180,15 @@ def test_presets_draft_and_final_change_the_render(real_blender: str, tiny_blend
     final, final_plan, final_log = results["Final"]
     assert draft.samples_total == 128 and final.samples_total == 4096
     assert draft.frame_times() and final.frame_times()
-    assert (draft_plan.output_dir / "0001.jpg").is_file()
-    assert (final_plan.output_dir / "0001.exr").is_file()
+    assert (draft_plan.output_dir / "0001.jpg").is_file()  # Draft жмёт в JPEG ради скорости
+    # Final формат не навязывает: на диск ложится то, что стоит в сцене (PNG по умолчанию).
+    assert (final_plan.output_dir / "0001.png").is_file()
     assert "[BRM] OK   cycles.time_limit = 20" in draft_log
-    assert "[BRM] OK   view_layer.cycles.denoising_store_passes = True" in final_log
     assert "[BRM] OK   cycles.sampling_pattern = 'BLUE_NOISE'" in final_log
-    # 5.0: OPEN_EXR_MULTILAYER отвергнут, сработал запасной OPEN_EXR; в 4.x пройдёт первый.
-    assert "[BRM] OK   render.image_settings.file_format = 'OPEN_EXR" in final_log
+    assert "render.image_settings.file_format" not in final_log
+    # Ни один пресет, кроме Heavy Scene, не трогает тайлы: разбиение кадра стоит времени.
+    for log in (draft_log, final_log):
+        assert "cycles.tile_size" not in log and "cycles.use_auto_tile" not in log
 
 
 def test_assemble_rendered_sequence_into_video(real_blender: str, real_ffmpeg: str, tiny_blend: Path, tmp_path: Path) -> None:
@@ -298,14 +300,16 @@ def test_history_recorded_from_a_real_render(real_blender: str, tiny_blend: Path
     assert len(times) == 3 and all(seconds > 0 for _frame, seconds in times)
 
 
-def test_hardware_tuned_preset_applies_on_real_blender(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
-    """Подстройка под железо: урезанный tile size реально принимается Blender'ом.
+def test_the_app_does_not_slow_the_render_down(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """Отзыв с реальной задачи: приложение рендерило кадр медленнее голого Blender.
 
-    Проверяется вся цепочка — проба железа, урезание пресета, резолвер,
-    override-скрипт — и то, что Blender подтверждает присваивание строкой OK.
+    Причина — навязанные настройки: подстройка под железо понижала tile до 1024
+    (кадр бился на четыре куска), а пресет добавлял Cryptomatte, denoise-пассы
+    и multilayer EXR. Здесь проверяется, что ничего из этого больше не уходит
+    в Blender: в логе нет ни одного присваивания, которого мы не просили.
     """
     from brm.core.hardware import HardwareInfo, detect_hardware
-    from brm.core.hardware_tuning import TILE_SIZE, tune_preset
+    from brm.core.hardware_tuning import tune_preset
 
     caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=180)
     info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=180)
@@ -316,9 +320,8 @@ def test_hardware_tuned_preset_applies_on_real_blender(real_blender: str, tiny_b
     hardware = HardwareInfo(gpu_name="Test card", vram_mb=8151, ram_mb=32189, cpu_threads=24)
 
     balanced = next(p for p in load_presets() if p.name == "Balanced")
-    assert balanced.cycles[TILE_SIZE] == 2048  # пресет писался под общий случай
     tuning = tune_preset(balanced, hardware, engine="CYCLES")
-    assert tuning.changes[TILE_SIZE] == 1024
+    assert not tuning.changed()  # на целевом ноутбуке урезать нечего
 
     resolved = resolve_preset(tuning.preset, caps, "CYCLES")
     overrides = compose_overrides(resolved)
@@ -327,15 +330,25 @@ def test_hardware_tuned_preset_applies_on_real_blender(real_blender: str, tiny_b
         blend_path=str(tiny_blend),
         engine="CYCLES",
         preset=balanced.name,
+        file_format=resolved.file_format,
         frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
         overrides=overrides,
     )
     plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path / "out")), info, tmp_dir=tmp_path / "tmp")
+    assert "-F" not in plan.argv  # формат берётся из сцены
     result = run_blender(plan.argv[0], plan.argv[1:], timeout=600)
     assert result.ok, result.tail(60)
 
     brm = result.brm_lines()
     assert not [line for line in brm if line.startswith("[BRM] FAIL")], brm
-    assert "[BRM] OK   cycles.tile_size = 1024" in brm
-    assert "[BRM] OK   cycles.use_auto_tile = True" in brm
+    unwanted = (
+        "cycles.tile_size",
+        "cycles.use_auto_tile",
+        "render.image_settings.file_format",
+        "render.resolution_percentage",
+        "view_layer.cycles.denoising_store_passes",
+        "view_layer.use_pass_cryptomatte_object",
+    )
+    for path in unwanted:
+        assert not [line for line in brm if path in line], (path, brm)
     assert (plan.output_dir / "0001.png").is_file()
