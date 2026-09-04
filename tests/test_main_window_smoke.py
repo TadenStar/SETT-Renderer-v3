@@ -427,7 +427,7 @@ def test_queue_restores_interrupted_items(qapp, settings_path: Path, fake_blende
 
 def test_author_credit_is_shown(qapp, settings_path: Path) -> None:
     window = MainWindow(SettingsStore(settings_path))
-    assert window.credit_label.text() == "Made by Pavel Postnikov"
+    assert window.credit_label.text() == "Made by Pavel Postnikov · Build 3001"
 
 
 def test_settings_dialog_ok_follows_validation(qapp, fake_blender: Path) -> None:
@@ -611,8 +611,10 @@ def test_display_modes_switch_which_form_feeds_overrides(
     form.rows["samples"].set_value(42)
     assert form.custom_values() == {"eevee.taa_render_samples": 42}
 
+    # Expert больше не страница в панели: он живёт в своём окне, а список
+    # режимов на это время блокируется, чтобы не врал о том, откуда значения.
     form.set_display_mode(VIEW_EXPERT)
-    assert form.stack.currentWidget() is form.expert_form
+    assert form.display_mode() == VIEW_EXPERT and not form.view_combo.isEnabled()
     assert form.custom_values() == {}  # экспертная форма ещё ничего не трогала
 
     form.expert_form.rows["eevee.taa_render_samples"].set_mode(MODE_CUSTOM)
@@ -1193,3 +1195,96 @@ def test_saving_over_a_builtin_name_is_refused(
     assert "built-in" in window.log_view.status_label.text()
     combo = window.settings_form.preset_combo
     assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
+
+
+# --- упрощение главного экрана ----------------------------------------------------
+
+
+def _on_main_screen(window: MainWindow, widget) -> bool:
+    """Виден ли виджет на главном экране, а не в отдельном окне."""
+    central = window.centralWidget()
+    parent = widget.parent()
+    while parent is not None:
+        if parent is central:
+            return True
+        parent = parent.parent()
+    return False
+
+
+def test_main_screen_keeps_only_what_is_used(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Отзыв: очередь, видео и экспертная форма пугали нагромождением."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    assert _on_main_screen(window, window.project_panel)
+    assert _on_main_screen(window, window.settings_form)
+    assert _on_main_screen(window, window.log_view)
+    for widget in (window.queue_view, window.video_panel, window.settings_form.expert_form):
+        assert not _on_main_screen(window, widget)
+    # Строки Camera и Safety с панели проекта тоже ушли.
+    assert window.project_panel.camera_label.isHidden()
+    assert not _on_main_screen(window, window.project_panel.safety_widget)
+
+
+def test_camera_is_shown_next_to_the_frames(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Отдельной строки у камеры больше нет, но сама информация не потерялась."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    assert "camera Camera" in window.project_panel.frames_label.text()
+
+
+def test_hidden_panels_open_in_their_own_windows(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    window.show_queue()
+    assert window._queue_dialog is not None and not window._queue_dialog.isHidden()
+    assert window._queue_dialog.view is window.queue_view
+
+    window.show_video()
+    assert window._video_dialog is not None and window._video_dialog.panel is window.video_panel
+
+    window.show_safety()
+    assert window._safety_dialog is not None
+    assert window._safety_dialog.content is window.project_panel.safety_widget
+    # Виджеты те же самые, значит состояние читается там же, где и раньше.
+    window.project_panel.resume_check.setChecked(False)
+    job = window.compose_job()
+    assert job is not None and job.resume is False
+
+
+def test_expert_window_takes_the_values_over_and_gives_them_back(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    from brm.ui.settings_form import VIEW_SIMPLE
+
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    form = window.settings_form
+    form.rows["samples"].set_mode(MODE_CUSTOM)
+    form.rows["samples"].set_value(42)
+    assert form.custom_values() == {"cycles.samples": 42}
+
+    window.show_expert_settings()
+    assert window._expert_window is not None and window._expert_window.form is form.expert_form
+    assert form.display_mode() == "expert" and not form.view_combo.isEnabled()
+    assert form.custom_values() == {}  # экспертное окно ещё ничего не трогало
+
+    window._expert_window.accept()  # закрыли — значения снова из простых строк
+    assert form.display_mode() == VIEW_SIMPLE and form.view_combo.isEnabled()
+    assert form.custom_values() == {"cycles.samples": 42}
+
+
+def test_build_number_is_next_to_the_author(qapp, settings_path: Path) -> None:
+    from brm import __build__
+
+    window = MainWindow(SettingsStore(settings_path))
+    assert window.credit_label.text() == f"Made by Pavel Postnikov · Build {__build__}"

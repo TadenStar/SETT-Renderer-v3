@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from brm import __author__, __version__
+from brm import __author__, __build__, __version__
 from brm.core.blender_locator import validate_blender_path
 from brm.core.capabilities import Capabilities, get_capabilities, support_problem
 from brm.core.ffmpeg import (
@@ -70,21 +70,25 @@ from brm.core.storage import AppSettings, SettingsStore, cache_dir, tmp_dir, wit
 from brm.core.system_actions import SHUTDOWN_DELAY_S, cancel_shutdown, schedule_shutdown
 from brm.core.video_runner import VIDEO_SUCCESS, VideoProcess, describe_result
 from brm.ui.banner import WarningBanner
+from brm.ui.expert_window import ExpertWindow
 from brm.ui.history_dialog import HistoryDialog
 from brm.ui.log_view import LogView
 from brm.ui.notifications import Notifier
 from brm.ui.progress_panel import ProgressPanel
 from brm.ui.project_panel import ProjectPanel, blend_paths_from_mime
+from brm.ui.queue_dialog import QueueDialog
 from brm.ui.queue_view import QueueView
 from brm.ui.onboarding_dialog import OnboardingDialog
 from brm.ui.preview_window import PreviewWindow
+from brm.ui.safety_dialog import SafetyDialog
 from brm.ui.settings_dialog import SettingsDialog
 from brm.ui.settings_form import SettingsForm
 from brm.ui.theme import apply_theme
+from brm.ui.video_dialog import VideoDialog
 from brm.ui.video_panel import VideoPanel
 from brm.ui.workers import FunctionTask
 
-CREDIT_TEXT = f"Made by {__author__}"
+CREDIT_TEXT = f"Made by {__author__} · Build {__build__}"
 CAPABILITIES_TIMEOUT = 180.0
 # Тяжёлый .blend может грузиться минуты, поэтому таймаут щедрый, а есть кнопка Cancel.
 PROJECT_TIMEOUT = 600.0
@@ -150,6 +154,10 @@ class MainWindow(QMainWindow):
         self.history_store = history_store or HistoryStore()
         self._history_dialog: HistoryDialog | None = None
         self._preview_window: PreviewWindow | None = None
+        self._queue_dialog: QueueDialog | None = None
+        self._safety_dialog: SafetyDialog | None = None
+        self._expert_window: ExpertWindow | None = None
+        self._video_dialog: VideoDialog | None = None
 
         self.presets: list[Preset] = load_presets()
         self.resolved_preset: ResolvedPreset | None = None
@@ -181,6 +189,7 @@ class MainWindow(QMainWindow):
         self.settings_form.tuning_toggled.connect(self._on_tuning_toggled)
         self.settings_form.save_preset_requested.connect(self.save_current_as_preset)
         self.settings_form.delete_preset_requested.connect(self.delete_selected_preset)
+        self.settings_form.expert_requested.connect(self.show_expert_settings)
         self.project_panel.scene_combo.currentTextChanged.connect(lambda _name: self.refresh_resolved_preset())
         self.queue_view.set_items(self.queue.items)
         self.video_panel.set_presets(self.video_presets, self.settings.last_video_preset)
@@ -224,6 +233,15 @@ class MainWindow(QMainWindow):
         preview_action.setShortcut(QKeySequence("Ctrl+P"))
         preview_action.triggered.connect(self.show_preview)
         view_menu.addAction(preview_action)
+
+        queue_action = QAction("&Queue…", self)
+        queue_action.setShortcut(QKeySequence("Ctrl+U"))
+        queue_action.triggered.connect(self.show_queue)
+        view_menu.addAction(queue_action)
+
+        video_action = QAction("Assemble &video…", self)
+        video_action.triggered.connect(self.show_video)
+        view_menu.addAction(video_action)
 
         help_menu = self.menuBar().addMenu("&Help")
         about_action = QAction("&About BRM", self)
@@ -274,6 +292,7 @@ class MainWindow(QMainWindow):
 
         self.project_panel = ProjectPanel()
         self.project_panel.file_requested.connect(self.open_project)
+        self.project_panel.safety_requested.connect(self.show_safety)
         self.settings_form = SettingsForm()
         self.progress_panel = ProgressPanel()
         self.log_view = LogView()
@@ -289,13 +308,14 @@ class MainWindow(QMainWindow):
         left = QSplitter(Qt.Orientation.Vertical)
         left.addWidget(self.project_panel)
         left.addWidget(self.settings_form)
-        left.addWidget(self.video_panel)
-        left.setSizes([300, 300, 230])
+        # Настройкам достаётся всё, что остаётся: раньше их зажимали панель видео
+        # и очередь, и строки сминались до нечитаемого.
+        left.setStretchFactor(1, 1)
+        left.setSizes([260, 500])
         right = QSplitter(Qt.Orientation.Vertical)
         right.addWidget(self.progress_panel)
         right.addWidget(self.log_view)
-        right.addWidget(self.queue_view)
-        right.setSizes([230, 330, 180])
+        right.setSizes([260, 480])
         main_split = QSplitter(Qt.Orientation.Horizontal)
         main_split.addWidget(left)
         main_split.addWidget(right)
@@ -414,6 +434,47 @@ class MainWindow(QMainWindow):
             self.settings = self.settings.model_copy(update={"last_preset": name})
             self._store.save(self.settings)
         self.refresh_resolved_preset()
+
+    # --- окна, вынесенные с главного экрана -----------------------------------------
+
+    def show_queue(self) -> None:
+        if self._queue_dialog is None:
+            self._queue_dialog = QueueDialog(self.queue_view, self)
+        self._queue_dialog.show()
+        self._queue_dialog.raise_()
+        self._queue_dialog.activateWindow()
+
+    def show_expert_settings(self) -> None:
+        """Экспертная форма в своём окне; пока оно открыто, значения берутся из него."""
+        from brm.ui.settings_form import VIEW_EXPERT
+
+        if self._expert_window is None:
+            self._expert_window = ExpertWindow(self.settings_form.expert_form, self)
+            self._expert_window.finished.connect(self._on_expert_closed)
+        self.settings_form.set_display_mode(VIEW_EXPERT)
+        self._expert_window.show()
+        self._expert_window.raise_()
+        self._expert_window.activateWindow()
+
+    def _on_expert_closed(self, _result: int) -> None:
+        """Окно закрыли — значения снова берутся из простых строк."""
+        from brm.ui.settings_form import VIEW_SIMPLE
+
+        self.settings_form.set_display_mode(VIEW_SIMPLE)
+
+    def show_video(self) -> None:
+        if self._video_dialog is None:
+            self._video_dialog = VideoDialog(self.video_panel, self)
+        self._video_dialog.show()
+        self._video_dialog.raise_()
+        self._video_dialog.activateWindow()
+
+    def show_safety(self) -> None:
+        if self._safety_dialog is None:
+            self._safety_dialog = SafetyDialog(self.project_panel.safety_widget, self)
+        self._safety_dialog.show()
+        self._safety_dialog.raise_()
+        self._safety_dialog.activateWindow()
 
     # --- свои пресеты --------------------------------------------------------------
 

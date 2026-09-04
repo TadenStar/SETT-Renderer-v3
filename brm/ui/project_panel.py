@@ -54,6 +54,7 @@ def blend_paths_from_mime(mime) -> list[str]:
 
 class ProjectPanel(QGroupBox):
     file_requested = Signal(str)
+    safety_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Project", parent)
@@ -92,8 +93,10 @@ class ProjectPanel(QGroupBox):
         self.scene_combo = QComboBox(self)
         self.scene_combo.currentTextChanged.connect(self._on_scene_changed)
         self.view_layer_combo = QComboBox(self)
+        # Камера видна в строке с диапазоном кадров: отдельная строка её не стоит.
         self.camera_label = QLabel("—", self)
         self.camera_label.setWordWrap(True)
+        self.camera_label.hide()
 
         # --- диапазон кадров ----------------------------------------------------
         self.mode_combo = QComboBox(self)
@@ -164,14 +167,24 @@ class ProjectPanel(QGroupBox):
             "Frames per Blender process. Memory leaks do not pile up and a crash costs one chunk, "
             "at the price of rebuilding the BVH per chunk. 'preset' takes the value from the preset"
         )
-        safety_row = QHBoxLayout()
-        safety_row.addWidget(self.resume_check)
-        safety_row.addWidget(QLabel("re-render below", self))
-        safety_row.addWidget(self.min_kb_spin)
-        safety_row.addSpacing(12)
-        safety_row.addWidget(QLabel("Chunk", self))
-        safety_row.addWidget(self.chunk_spin)
-        safety_row.addStretch(1)
+        self.safety_button = QPushButton("Safety…", self)
+        self.safety_button.setToolTip("Skipping finished frames, minimum frame size and chunk size")
+        self.safety_button.clicked.connect(self.safety_requested)
+
+        # Виджеты живут здесь (их читает current_job), а показываются в отдельном
+        # окне: в работе эти три поля не трогают, а место на главном экране занимали.
+        self.safety_widget = QWidget()
+        safety_form = QFormLayout(self.safety_widget)
+        safety_form.setContentsMargins(0, 0, 0, 0)
+        min_kb_row = QHBoxLayout()
+        min_kb_row.addWidget(self.min_kb_spin)
+        min_kb_row.addStretch(1)
+        chunk_row = QHBoxLayout()
+        chunk_row.addWidget(self.chunk_spin)
+        chunk_row.addStretch(1)
+        safety_form.addRow(self.resume_check)
+        safety_form.addRow("Re-render below:", min_kb_row)
+        safety_form.addRow("Chunk size:", chunk_row)
 
         # --- компоновка ---------------------------------------------------------
         self.form = QWidget(self)
@@ -179,13 +192,13 @@ class ProjectPanel(QGroupBox):
         form.setContentsMargins(0, 0, 0, 0)
         form.addRow("Scene:", self.scene_combo)
         form.addRow("View layer:", self.view_layer_combo)
-        form.addRow("Camera:", self.camera_label)
         form.addRow("Frames:", range_row)
         form.addRow("", self.frames_label)
         form.addRow("Output:", output_row)
         form.addRow("", self.output_preview)
-        form.addRow("Safety:", safety_row)
         self.form.setEnabled(False)
+
+        file_row.addWidget(self.safety_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(file_row)
@@ -317,6 +330,7 @@ class ProjectPanel(QGroupBox):
         others = [c for c in scene.cameras if c != scene.active_camera]
         suffix = f" (also: {', '.join(others)})" if others else ""
         self.camera_label.setText(f"{active}{suffix}")
+        self._update_frames_summary()
 
         self.file_range_label.setText(
             f"{scene.frame_start}..{scene.frame_end}, step {scene.frame_step} in file"
@@ -358,6 +372,9 @@ class ProjectPanel(QGroupBox):
         text = describe_frames(frames)
         if scene is not None and scene.fps:
             text += f" · {len(frames) / scene.fps:.1f} s at {scene.fps:g} fps"
+        camera = self.camera_label.text()
+        if scene is not None and camera and camera != "—":
+            text += f" · camera {camera}"
         self.frames_label.setText(text)
         set_role(self.frames_label, "")
 
