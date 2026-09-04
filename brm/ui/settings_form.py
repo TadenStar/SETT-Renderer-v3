@@ -22,8 +22,10 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QFrame,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -43,7 +45,9 @@ DEFAULT_FORMATS = ["PNG", "JPEG", "OPEN_EXR", "OPEN_EXR_MULTILAYER", "TIFF", "BM
 VIEW_PRESET_ONLY = "preset_only"
 VIEW_SIMPLE = "simple"
 VIEW_EXPERT = "expert"
-_VIEWS = [("Preset", VIEW_PRESET_ONLY), ("Simple", VIEW_SIMPLE), ("Expert", VIEW_EXPERT)]
+# В списке два режима; Expert включается кнопкой «All settings…» и живёт
+# в своём окне, поэтому страницы в стеке для него нет.
+_VIEWS = [("Preset", VIEW_PRESET_ONLY), ("Simple", VIEW_SIMPLE)]
 _VIEW_INDEX = {value: index for index, (_title, value) in enumerate(_VIEWS)}
 
 
@@ -226,12 +230,15 @@ class SettingsForm(QGroupBox):
     tuning_toggled = Signal(bool)
     save_preset_requested = Signal()
     delete_preset_requested = Signal()
+    expert_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Render Settings", parent)
         self._presets: list[Preset] = []
         self._caps: Capabilities | None = None
         self._engine: str | None = None
+        # Значения берутся из экспертного окна, а не из списка режимов.
+        self._expert_mode = False
 
         self.preset_combo = QComboBox(self)
         self.preset_combo.currentIndexChanged.connect(self._on_preset_index)
@@ -271,10 +278,15 @@ class SettingsForm(QGroupBox):
             self.view_combo.addItem(title, value)
         self.view_combo.setCurrentIndex(_VIEW_INDEX[VIEW_SIMPLE])
         self.view_combo.currentIndexChanged.connect(self._on_view_changed)
+        self.expert_button = QPushButton("All settings…", self)
+        self.expert_button.setToolTip("Every property this Blender exposes, in a separate window")
+        self.expert_button.clicked.connect(self.expert_requested)
+
         view_row = QHBoxLayout()
         view_row.addWidget(QLabel("Mode:", self))
         view_row.addWidget(self.view_combo)
         view_row.addStretch(1)
+        view_row.addWidget(self.expert_button)
 
         self.skipped_label = QLabel("", self)
         self.skipped_label.setWordWrap(True)
@@ -297,13 +309,20 @@ class SettingsForm(QGroupBox):
             self.rows[spec.key] = row
             simple_form.addRow(f"{spec.label}:", row)
 
-        self.expert_form = ExpertForm(self)
+        # Экспертная форма живёт здесь, а показывается в отдельном окне: сотни
+        # свойств на главном экране пугали больше, чем помогали.
+        self.expert_form = ExpertForm()
         self.expert_form.values_changed.connect(self.values_changed)
+        # Простые строки прокручиваются: панель может оказаться низкой,
+        # и тогда поля не должны сминаться до нечитаемого состояния.
+        self._simple_scroll = QScrollArea(self)
+        self._simple_scroll.setWidget(simple_page)
+        self._simple_scroll.setWidgetResizable(True)
+        self._simple_scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         self.stack = QStackedWidget(self)
         self.stack.addWidget(preset_only_page)
-        self.stack.addWidget(simple_page)
-        self.stack.addWidget(self.expert_form)
+        self.stack.addWidget(self._simple_scroll)
         self.stack.setCurrentIndex(_VIEW_INDEX[VIEW_SIMPLE])
 
         layout = QVBoxLayout(self)
@@ -360,12 +379,25 @@ class SettingsForm(QGroupBox):
         self.tuning_label.show()
 
     def display_mode(self) -> str:
-        return self.view_combo.currentData()
+        return VIEW_EXPERT if self._expert_mode else self.view_combo.currentData()
 
     def set_display_mode(self, mode: str) -> None:
+        """Expert не выбирается списком: он включается кнопкой и живёт в своём окне."""
+        if mode == VIEW_EXPERT:
+            self._expert_mode = True
+            self._sync_mode_note()
+            self.values_changed.emit()
+            return
+        self._expert_mode = False
         index = self.view_combo.findData(mode)
         if index >= 0:
             self.view_combo.setCurrentIndex(index)
+        self._sync_mode_note()
+
+    def _sync_mode_note(self) -> None:
+        """Пока значения берутся из экспертного окна, список режимов не врёт."""
+        self.view_combo.setEnabled(not self._expert_mode)
+        self.expert_button.setText("All settings…" if not self._expert_mode else "All settings (in use)…")
 
     def set_capabilities(self, caps: Capabilities | None) -> None:
         self._caps = caps
@@ -419,9 +451,10 @@ class SettingsForm(QGroupBox):
             self.preset_changed.emit(name)
 
     def _on_view_changed(self, _index: int) -> None:
-        # По имени режима, а не по индексу комбобокса: порядок страниц стека
-        # и пунктов списка не обязан совпадать вечно.
-        self.stack.setCurrentIndex(_VIEW_INDEX[self.display_mode()])
+        # По имени режима из списка, а не по индексу комбобокса: порядок страниц
+        # стека и пунктов списка не обязан совпадать вечно. display_mode() здесь
+        # не годится — он может вернуть Expert, у которого страницы нет.
+        self.stack.setCurrentIndex(_VIEW_INDEX[self.view_combo.currentData()])
         self.values_changed.emit()  # смена режима меняет действующие overrides
 
     def _show_description(self) -> None:
