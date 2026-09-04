@@ -132,6 +132,28 @@ class Capabilities(BaseModel):
         return "CPU"
 
 
+COMPUTE_AUTO = "auto"
+COMPUTE_GPU = "gpu"
+COMPUTE_GPU_CPU = "gpu_cpu"
+COMPUTE_CPU = "cpu"
+COMPUTE_MODES = (COMPUTE_AUTO, COMPUTE_GPU, COMPUTE_GPU_CPU, COMPUTE_CPU)
+
+
+def device_for_mode(mode: str, caps: "Capabilities") -> tuple[str, bool]:
+    """(тип устройства для ``--cycles-device``, помогает ли CPU) из режима.
+
+    Спека: GPU по умолчанию, CPU — по явному выбору. Если GPU в системе нет,
+    любой режим честно сваливается на CPU, а не притворяется, что считает на карте.
+    """
+    if mode == COMPUTE_CPU:
+        return "CPU", False
+    best = caps.best_cycles_device()
+    if mode == COMPUTE_GPU_CPU:
+        # На CPU-only машине «GPU + CPU» — это просто CPU.
+        return best, best != "CPU"
+    return best, False
+
+
 class CapabilitiesError(RuntimeError):
     """Проба не удалась: Blender не запустился, упал или вернул неразборчивый JSON."""
 

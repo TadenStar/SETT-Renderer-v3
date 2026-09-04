@@ -123,6 +123,28 @@ def configure_cycles(scene, settings, log):
         log.append(f"{FAIL} cycles devices: {exc}")
 
 
+def enable_camera_culling(scene, log):
+    """Включает отсечение по камере на объектах сцены.
+
+    Галка на сцене сама по себе ничего не режет: Cycles смотрит на
+    ``object.cycles.use_camera_cull`` у каждого объекта. Меняется только память
+    этого процесса, исходный .blend не сохраняется.
+    """
+    enabled = skipped = 0
+    for obj in scene.objects:
+        settings = getattr(obj, "cycles", None)
+        if settings is None or not hasattr(settings, "use_camera_cull"):
+            skipped += 1
+            continue
+        try:
+            settings.use_camera_cull = True
+            enabled += 1
+        except Exception as exc:
+            log.append(f"{SKIP} {obj.name}.cycles.use_camera_cull: {exc}")
+            skipped += 1
+    log.append(f"{OK}   camera cull enabled on {enabled} object(s), {skipped} skipped")
+
+
 def restrict_view_layers(scene, name, log):
     """Рендерить только выбранный view layer: у остальных снимаем ``use``."""
     if not name or name not in scene.view_layers:
@@ -164,6 +186,9 @@ def main():
     if scene.render.engine == "CYCLES":
         configure_cycles(scene, settings, log)
     apply_assignments(roots, settings.get("assignments", []), log)
+    # После присваиваний: галку сцены могли включить именно они.
+    if settings.get("camera_cull_objects") and scene.render.engine == "CYCLES":
+        enable_camera_culling(scene, log)
 
     for line in log:
         print(f"[BRM] {line}", flush=True)

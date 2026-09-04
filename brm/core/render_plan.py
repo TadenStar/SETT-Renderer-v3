@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from brm.core.capabilities import Capabilities
+from brm.core.capabilities import Capabilities, device_for_mode
 from brm.core.command_builder import build_argv, command_line
 from brm.core.frame_range import resolve_frames
 from brm.core.models import RenderJob, expand_output_template
@@ -107,11 +107,18 @@ def build_render_plan(
 
     engine = job.engine or scene.engine
     cycles_device = None
+    use_cpu = False
     if engine == "CYCLES":
-        cycles_device = job.cycles_device or caps.best_cycles_device()
+        cycles_device, use_cpu = device_for_mode(job.compute_mode, caps)
+        if job.cycles_device:
+            cycles_device = job.cycles_device  # явный тип из задачи важнее режима
 
     override_settings = build_override_settings(
-        job, scene_name=scene.name, engine=engine, compute_device_type=cycles_device
+        job,
+        scene_name=scene.name,
+        engine=engine,
+        compute_device_type=cycles_device,
+        use_cpu=use_cpu,
     )
     override_script = write_override_script(override_settings, tmp_dir, job.id)
 

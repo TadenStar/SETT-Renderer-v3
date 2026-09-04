@@ -31,6 +31,13 @@ class RenderJob(BaseModel):
     # Движок и устройство: None — как в файле / лучшее доступное из capabilities.
     engine: str | None = None
     cycles_device: str | None = None
+    # Чем считать Cycles: auto — лучшее из доступного, gpu_cpu — GPU плюс CPU
+    # в помощь, cpu — только процессор. Отдельно от cycles_device: тот хранит
+    # тип устройства (OPTIX/CUDA), а это выбор пользователя.
+    compute_mode: str = "auto"
+    # Отсечение по камере: Cycles смотрит на флаг у каждого объекта, поэтому
+    # override включает его на объектах в памяти процесса.
+    camera_cull: bool = False
     # None — формат берётся из сцены (-F не передаётся). Строка только когда
     # пользователь или пресет выбрали формат осознанно.
     file_format: str | None = None

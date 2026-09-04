@@ -1456,3 +1456,82 @@ def test_live_chart_draws_earlier_runs_under_the_current_one(
     roles = [s.role for s in window.progress_panel.chart.series()]
     assert roles.count(ROLE_CURRENT) == 1 and ROLE_RECENT in roles
     assert current_points(window.progress_panel.chart) == [(f, 0.1) for f in (1, 2, 3)]
+
+
+# --- устройство, отсечение по камере и анализ сцены --------------------------------
+
+
+def test_device_choice_reaches_the_job_and_is_remembered(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    from brm.core.capabilities import COMPUTE_CPU, COMPUTE_GPU_CPU
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=r"D:\out"))
+    window = _ready_window(
+        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    form = window.settings_form
+    assert form.compute_mode() == "auto"  # дефолт: лучшее из доступного
+
+    form.device_combo.setCurrentIndex(form.device_combo.findData(COMPUTE_GPU_CPU))
+    assert store.load().compute_mode == COMPUTE_GPU_CPU  # выбор переживёт перезапуск
+    job = window.compose_job()
+    assert job is not None and job.compute_mode == COMPUTE_GPU_CPU
+
+    form.device_combo.setCurrentIndex(form.device_combo.findData(COMPUTE_CPU))
+    assert window.compose_job().compute_mode == COMPUTE_CPU
+
+
+def test_camera_culling_checkbox_reaches_the_job(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    assert window.compose_job().camera_cull is False
+    window.settings_form.cull_check.setChecked(True)
+    assert window.compose_job().camera_cull is True
+
+
+def test_analyze_button_needs_a_project(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    window = MainWindow(configured_store, capabilities_loader=caps_loader, project_loader=cycles_project_loader)
+    assert not window.project_panel.analyze_button.isEnabled()
+    load_project(qapp, window, blend_file)
+    assert window.project_panel.analyze_button.isEnabled()
+
+
+def test_scene_analysis_shows_numbers_and_survives_failure(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path, monkeypatch
+) -> None:
+    from brm.core.scene_stats import SceneStats
+    from brm.ui import main_window as main_window_mod
+
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    stats = SceneStats(
+        objects=9, meshes=3, triangles=63048, instances=4, instanced_triangles=48,
+        objects_by_type={"MESH": 3, "EMPTY": 4}, camera_culled_objects=1,
+    )
+    monkeypatch.setattr(main_window_mod, "analyze_scene", lambda *a, **k: stats)
+    window.analyze_scene()
+    wait_until(qapp, lambda: window._analysis_task is None, timeout=15)
+
+    dialog = window._analysis_dialog
+    assert dialog is not None and not dialog.isHidden()
+    assert dialog.rows["objects"].text() == "9" and dialog.rows["instances"].text() == "4"
+    assert "63.0 k" in dialog.rows["triangles"].text()
+    assert "mesh 3" in dialog.rows["objects_by_type"].text()
+    assert any("scene analysis" in line for line in window.log_view.lines())
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("blender exploded")
+
+    monkeypatch.setattr(main_window_mod, "analyze_scene", broken)
+    window.analyze_scene()
+    wait_until(qapp, lambda: window._analysis_task is None, timeout=15)
+    assert "blender exploded" in dialog.status_label.text()
+    assert window.render_button.isEnabled()  # неудачный анализ не ломает рендер

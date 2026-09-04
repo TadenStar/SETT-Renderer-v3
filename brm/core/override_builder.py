@@ -26,6 +26,7 @@ def build_override_settings(
     scene_name: str,
     engine: str,
     compute_device_type: str | None,
+    use_cpu: bool = False,
 ) -> dict[str, Any]:
     """Что override-скрипт должен применить. ``engine`` в SETTINGS только при явной замене."""
     return {
@@ -34,7 +35,9 @@ def build_override_settings(
         "engine": job.engine,
         "disable_sequencer": True,
         "compute_device_type": compute_device_type if engine == "CYCLES" else None,
-        "cycles_use_cpu": False,
+        "cycles_use_cpu": use_cpu,
+        # Галка на сцене ничего не режет без флага у объектов — включает override.
+        "camera_cull_objects": bool(job.camera_cull) and engine == "CYCLES",
         "assignments": [[path, value] for path, value in job.overrides.items()],
         "strict": False,
     }

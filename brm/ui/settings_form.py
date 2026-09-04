@@ -32,7 +32,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from brm.core.capabilities import Capabilities
+from brm.core.capabilities import (
+    COMPUTE_AUTO,
+    COMPUTE_CPU,
+    COMPUTE_GPU,
+    COMPUTE_GPU_CPU,
+    Capabilities,
+)
 from brm.core.preset_resolver import FILE_FORMAT_PATH, ResolvedPreset
 from brm.core.presets import Preset
 from brm.ui.expert_form import ExpertForm
@@ -45,6 +51,13 @@ DEFAULT_FORMATS = ["PNG", "JPEG", "OPEN_EXR", "OPEN_EXR_MULTILAYER", "TIFF", "BM
 VIEW_PRESET_ONLY = "preset_only"
 VIEW_SIMPLE = "simple"
 VIEW_EXPERT = "expert"
+# Чем считать: подписи для списка. Значения — как в AppSettings.compute_mode.
+_COMPUTE_MODES = [
+    ("Auto", COMPUTE_AUTO),
+    ("GPU", COMPUTE_GPU),
+    ("GPU + CPU", COMPUTE_GPU_CPU),
+    ("CPU", COMPUTE_CPU),
+]
 # В списке два режима; Expert включается кнопкой «All settings…» и живёт
 # в своём окне, поэтому страницы в стеке для него нет.
 _VIEWS = [("Preset", VIEW_PRESET_ONLY), ("Simple", VIEW_SIMPLE)]
@@ -231,6 +244,7 @@ class SettingsForm(QGroupBox):
     save_preset_requested = Signal()
     delete_preset_requested = Signal()
     expert_requested = Signal()
+    compute_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Render Settings", parent)
@@ -278,6 +292,26 @@ class SettingsForm(QGroupBox):
             self.view_combo.addItem(title, value)
         self.view_combo.setCurrentIndex(_VIEW_INDEX[VIEW_SIMPLE])
         self.view_combo.currentIndexChanged.connect(self._on_view_changed)
+        self.device_combo = QComboBox(self)
+        for title, value in _COMPUTE_MODES:
+            self.device_combo.addItem(title, value)
+        self.device_combo.setToolTip(
+            "GPU is the default. Adding the CPU helps on light scenes and gets in the way on heavy ones"
+        )
+        self.device_combo.currentIndexChanged.connect(
+            lambda _index: self.compute_changed.emit(self.compute_mode())
+        )
+        self.cull_check = QCheckBox("Camera culling", self)
+        self.cull_check.setToolTip(
+            "Skip objects outside the camera view. Cycles only; the .blend file is not changed"
+        )
+        self.cull_check.toggled.connect(self.values_changed)
+        device_row = QHBoxLayout()
+        device_row.addWidget(QLabel("Device:", self))
+        device_row.addWidget(self.device_combo)
+        device_row.addWidget(self.cull_check)
+        device_row.addStretch(1)
+
         self.expert_button = QPushButton("All settings…", self)
         self.expert_button.setToolTip("Every property this Blender exposes, in a separate window")
         self.expert_button.clicked.connect(self.expert_requested)
@@ -331,6 +365,7 @@ class SettingsForm(QGroupBox):
         layout.addWidget(self.warning_label)
         layout.addWidget(self.tune_check)
         layout.addWidget(self.tuning_label)
+        layout.addLayout(device_row)
         layout.addLayout(view_row)
         layout.addWidget(self.stack, 1)
         layout.addWidget(self.skipped_label)
@@ -350,6 +385,23 @@ class SettingsForm(QGroupBox):
 
     def current_preset_name(self) -> str | None:
         return self.preset_combo.currentData()
+
+    def compute_mode(self) -> str:
+        return self.device_combo.currentData() or COMPUTE_AUTO
+
+    def set_compute_mode(self, mode: str) -> None:
+        index = self.device_combo.findData(mode)
+        self.device_combo.blockSignals(True)
+        self.device_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.device_combo.blockSignals(False)
+
+    def camera_culling(self) -> bool:
+        return self.cull_check.isChecked()
+
+    def set_camera_culling(self, enabled: bool) -> None:
+        self.cull_check.blockSignals(True)
+        self.cull_check.setChecked(enabled)
+        self.cull_check.blockSignals(False)
 
     def tuning_enabled(self) -> bool:
         return self.tune_check.isChecked()
