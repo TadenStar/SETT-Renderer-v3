@@ -21,7 +21,8 @@ from PySide6.QtWidgets import (
 
 from brm.core.history import HistoryEntry
 from brm.core.render_stats import format_duration, format_memory
-from brm.ui.sparkline import Sparkline
+from brm.core.frame_chart import ChartSeries, series_summary
+from brm.ui.frame_chart import FrameChart
 from brm.ui.theme import set_role
 
 COLUMNS = ("Date", "Project", "Scene", "Preset", "Engine", "Frames", "Avg frame", "Total", "Peak mem", "Status")
@@ -47,6 +48,9 @@ class _NumericItem(QTableWidgetItem):
 class HistoryView(QWidget):
     row_selected = Signal(str)  # stats_path выбранной записи; "" — ничего не выбрано
     refresh_requested = Signal()
+    reference_toggled = Signal()   # объявить выбранный прогон эталоном или снять эталон
+    delete_requested = Signal()    # убрать выбранный прогон из истории
+    clear_requested = Signal()     # стереть историю целиком
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -67,19 +71,34 @@ class HistoryView(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
 
+        self.reference_button = QPushButton("Set as reference", self)
+        self.reference_button.setToolTip("Draw this render in gold on every chart to compare against")
+        self.reference_button.clicked.connect(self.reference_toggled)
+        self.reference_button.setEnabled(False)
+        self.delete_button = QPushButton("Delete", self)
+        self.delete_button.setToolTip("Remove this render from the history")
+        self.delete_button.clicked.connect(self.delete_requested)
+        self.delete_button.setEnabled(False)
+        self.clear_button = QPushButton("Clear all", self)
+        self.clear_button.setToolTip("Erase the whole render history")
+        self.clear_button.clicked.connect(self.clear_requested)
+
         self.chart_label = QLabel("Select a render to see its frame times", self)
         set_role(self.chart_label, "muted")
-        self.sparkline = Sparkline(self)
+        self.chart = FrameChart(self)
 
         header_row = QHBoxLayout()
         header_row.addWidget(self.refresh_button)
         header_row.addWidget(self.count_label, 1)
+        header_row.addWidget(self.reference_button)
+        header_row.addWidget(self.delete_button)
+        header_row.addWidget(self.clear_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(header_row)
         layout.addWidget(self.table, 1)
         layout.addWidget(self.chart_label)
-        layout.addWidget(self.sparkline)
+        layout.addWidget(self.chart)
 
     # --- публичное API ---------------------------------------------------------
 
@@ -106,7 +125,7 @@ class HistoryView(QWidget):
                 self.table.setItem(row, column, item)
         self.table.setSortingEnabled(True)
         self.count_label.setText(f"{len(entries)} render(s)")
-        self.show_chart([], "")
+        self.show_series([])
 
     def selected_entry(self) -> HistoryEntry | None:
         model = self.table.selectionModel()
@@ -116,9 +135,21 @@ class HistoryView(QWidget):
         stats_path = self.table.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
         return next((e for e in self._entries if e.stats_path == stats_path), None)
 
-    def show_chart(self, times: list[tuple[int, float]], label: str) -> None:
-        self.sparkline.set_values(times)
-        self.chart_label.setText(label or "Select a render to see its frame times")
+    def show_series(self, series: list[ChartSeries]) -> None:
+        """Все линии сразу: выбранный прогон, последние пять и эталон.
+
+        ``live=False`` — рендер не идёт, ось X охватывает все линии, иначе
+        короткий прогон не сравнить с длинным.
+        """
+        self.chart.set_series(series, live=False)
+        summary = series_summary(series)
+        self.chart_label.setText(summary if series else "Select a render to see its frame times")
+
+    def set_reference_state(self, *, is_reference: bool, has_selection: bool) -> None:
+        """Кнопки зависят от выбора: удалять и назначать эталон нечего без строки."""
+        self.reference_button.setEnabled(has_selection)
+        self.reference_button.setText("Clear reference" if is_reference else "Set as reference")
+        self.delete_button.setEnabled(has_selection)
 
     # --- слоты -------------------------------------------------------------------
 

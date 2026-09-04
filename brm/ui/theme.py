@@ -17,6 +17,12 @@ THEMES = ("dark", "light", "system")
 DEFAULT_THEME = "dark"
 
 DARK = {
+    # График времени кадров: синий — текущий рендер, красный — прошлые
+    # (чем старше, тем темнее — оттенок считает ui/frame_chart.py), золотой — эталон.
+    "chart_current": "#4E9BE8",
+    "chart_recent": "#D9524F",
+    "chart_reference": "#E3B341",
+    "chart_axis": "#3A3A3A",
     "window": "#1B1B1B",
     "card": "#242424",
     "card_border": "#2E2E2E",
@@ -50,6 +56,12 @@ DARK = {
 }
 
 LIGHT = {
+    # График времени кадров: синий — текущий рендер, красный — прошлые
+    # (чем старше, тем темнее — оттенок считает ui/frame_chart.py), золотой — эталон.
+    "chart_current": "#1F6FBF",
+    "chart_recent": "#B03A37",
+    "chart_reference": "#B8860B",
+    "chart_axis": "#C9C9C9",
     "window": "#F2F2F2",
     "card": "#FFFFFF",
     "card_border": "#E0E0E0",
