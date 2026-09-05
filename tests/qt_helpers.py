@@ -10,8 +10,9 @@ from brm.core.command_builder import command_line
 from brm.core.render_plan import RenderPlan
 
 
-# Запас на загруженную машину: во время настоящего рендера Cycles очередь
-# событий Qt разбирается заметно медленнее, и пять секунд стали мигать.
+# Пятнадцать секунд вместо пяти — просто запас на медленную машину. Падения
+# теста сборки видео объяснялись не этим: причиной была утечка окон между
+# тестами, см. _close_leftover_windows в conftest.py.
 def wait_until(qapp, predicate: Callable[[], bool], timeout: float = 15.0) -> None:
     """Крутит цикл событий, пока условие не выполнится: сигналы из потоков и процессов идут через очередь."""
     deadline = time.monotonic() + timeout
