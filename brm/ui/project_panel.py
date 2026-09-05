@@ -196,8 +196,12 @@ class ProjectPanel(QGroupBox):
         self.form = QWidget(self)
         form = QFormLayout(self.form)
         form.setContentsMargins(0, 0, 0, 0)
-        form.addRow("Scene:", self.scene_combo)
-        form.addRow("View layer:", self.view_layer_combo)
+        # Строки сцены и слоя прячутся, когда выбирать не из чего: в файле с одной
+        # сценой и одним слоем они только занимали место (отзыв с реальной задачи).
+        self.scene_label = QLabel("Scene:", self)
+        self.view_layer_label = QLabel("View layer:", self)
+        form.addRow(self.scene_label, self.scene_combo)
+        form.addRow(self.view_layer_label, self.view_layer_combo)
         form.addRow("Frames:", range_row)
         form.addRow("", self.frames_label)
         form.addRow("Output:", output_row)
@@ -259,6 +263,7 @@ class ProjectPanel(QGroupBox):
         self.scene_combo.blockSignals(True)
         self.scene_combo.clear()
         self.scene_combo.addItems([s.name for s in info.scenes])
+        self._show_row(self.scene_label, self.scene_combo, len(info.scenes) > 1)
         default = info.default_scene()
         if default is not None:
             self.scene_combo.setCurrentText(default.name)
@@ -336,6 +341,7 @@ class ProjectPanel(QGroupBox):
             self._update_output_preview()
             return
         self.view_layer_combo.addItems([vl.name for vl in scene.view_layers])
+        self._show_row(self.view_layer_label, self.view_layer_combo, len(scene.view_layers) > 1)
         active = scene.active_camera or "none"
         others = [c for c in scene.cameras if c != scene.active_camera]
         suffix = f" (also: {', '.join(others)})" if others else ""
@@ -362,6 +368,12 @@ class ProjectPanel(QGroupBox):
         mode = self.mode_combo.currentData()
         self.step_spin.setEnabled(mode in (FrameRangeMode.FROM_FILE, FrameRangeMode.MANUAL))
         self._update_frames_summary()
+
+    @staticmethod
+    def _show_row(label: QLabel, widget: QWidget, visible: bool) -> None:
+        """Показывает или прячет строку формы целиком, вместе с подписью."""
+        label.setVisible(visible)
+        widget.setVisible(visible)
 
     def _update_frames_summary(self) -> None:
         scene = self._scene

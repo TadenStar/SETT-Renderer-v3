@@ -42,6 +42,7 @@ def test_argv_full_canonical_order() -> None:
         threads=0,
         file_format="PNG",
         cycles_device="OPTIX",
+        cycles_print_stats=True,
     )
     assert argv == [
         BLENDER,
@@ -101,3 +102,19 @@ def test_python_before_output_before_frames() -> None:
 def test_command_line_quotes_spaces_and_keeps_cyrillic() -> None:
     line = command_line([r"C:\Program Files\b.exe", "-b", r"D:\мой проект\a.blend", "-a"])
     assert line == r'"C:\Program Files\b.exe" -b "D:\мой проект\a.blend" -a'
+
+
+def test_cycles_stats_are_off_by_default() -> None:
+    """Таблица текстур врезалась в строки прогресса и раздувала лог в 10 раз.
+
+    Устройство видно в логе по строкам [BRM] от override-скрипта, поэтому
+    статистика Cycles запрашивается только по явному требованию.
+    """
+    argv = build_argv(BLENDER, BLEND, frames=[1], output_path=OUT, cycles_device="OPTIX")
+    assert "--cycles-print-stats" not in argv
+    assert argv[-2:] == ["--cycles-device", "OPTIX"]
+
+    with_stats = build_argv(
+        BLENDER, BLEND, frames=[1], output_path=OUT, cycles_device="OPTIX", cycles_print_stats=True
+    )
+    assert with_stats[-1] == "--cycles-print-stats"

@@ -11,7 +11,11 @@ from dataclasses import dataclass
 
 BRM_PREFIX = "[BRM]"
 
-RE_CLOG = re.compile(r"^(?P<ts>\d{2}:\d{2}(?::\d{2})?\.\d{3})\s+(?P<cat>[\w.]+)\s+\|\s?(?P<body>.*)$")
+# Префикс clog ищется в любом месте строки, а не только в начале: Blender пишет
+# статистику Cycles другим потоком и врезает её в середину строки, из-за чего
+# «Saved:» теряло начало строки и ни один кадр не засчитывался (найдено на
+# рендере из 1441 кадра: 98 строк Saved, ни одной с начала строки).
+RE_CLOG = re.compile(r"(?P<ts>\d{2}:\d{2}(?::\d{2})?\.\d{3})\s+(?P<cat>[\w.]+)\s+\|\s?(?P<body>.*)$")
 RE_FRA = re.compile(r"^Fra:\s*(?P<frame>-?\d+)")
 RE_SAMPLE = re.compile(r"\bSample\s+(?P<cur>\d+)\s*/\s*(?P<total>\d+)")
 RE_EEVEE_SAMPLE = re.compile(r"\bRendering\s+(?P<cur>\d+)\s*/\s*(?P<total>\d+)\s+samples")
@@ -91,7 +95,12 @@ def parse_mem(value: str, unit: str) -> float | None:
 
 
 def strip_clog_prefix(line: str) -> str:
-    match = RE_CLOG.match(line)
+    """Тело строки после префикса clog. Префикс может оказаться не в начале.
+
+    ``search``, а не ``match``: посторонний вывод склеивается с началом строки
+    лога, и тогда всё, что до префикса, — чужой мусор, который надо отбросить.
+    """
+    match = RE_CLOG.search(line)
     return match.group("body") if match else line
 
 

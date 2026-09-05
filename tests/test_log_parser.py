@@ -131,3 +131,34 @@ def test_no_camera_log_reports_exactly_one_error(logs_dir: Path) -> None:
     lines = (logs_dir / "no_camera_error_5.0.1.log").read_text(encoding="utf-8").splitlines()
     errors = [line for line in lines if is_error_line(line)]
     assert len(errors) == 1 and "no camera" in errors[0]
+
+
+# Ровно та форма строки, из-за которой на рендере из 1441 кадра не засчитался
+# ни один кадр: таблица --cycles-print-stats пишется другим потоком и врезается
+# в начало строки лога. Из 98 строк «Saved:» ни одна не начиналась с начала строки.
+MANGLED_SAVED = (
+    "        brick_Displacement.jpg           16.00M (16,777,200:20.234  render           | "
+    r"Saved: 'C:\Working\Sett\RM\Scene\0000.jpg'"
+)
+
+
+def test_saved_line_glued_to_foreign_output_is_still_parsed() -> None:
+    """Правило 6: парсер деградирует мягко, а не теряет кадры молча."""
+    event = parse_line(MANGLED_SAVED)
+    assert event.kind == KIND_SAVED
+    assert event.saved_path == r"C:\Working\Sett\RM\Scene\0000.jpg"
+
+
+def test_progress_line_glued_to_foreign_output_is_still_parsed() -> None:
+    line = "        some_texture.png   64.00M (67,108,800:36.265  render           | Fra: 70 | Mem: 2316M | Sample 1/128"
+    event = parse_line(line)
+    assert event.kind == KIND_PROGRESS and event.frame == 70
+    assert event.sample == 1 and event.samples_total == 128
+
+
+def test_clean_lines_are_unaffected() -> None:
+    """Поиск префикса где угодно не должен ломать обычные строки."""
+    event = parse_line("00:20.234  render           | Time: 00:19.28 (Saving: 00:00.14)")
+    assert event.kind == KIND_TIME and event.frame_time_s == 19.28
+    assert parse_line("Blender quit").kind == KIND_QUIT
+    assert parse_line("some unrelated text").kind == KIND_OTHER
