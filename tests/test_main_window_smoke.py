@@ -1643,3 +1643,38 @@ def test_editing_outside_manual_does_not_touch_it(
     assert form.current_preset_name() == "Draft"
     assert store.load().manual_overrides == {}
     assert window.compose_job().overrides["cycles.samples"] == 17
+
+
+def test_a_stopped_render_lands_in_the_history(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """Остановленный рендер — обычный рабочий сценарий, а не сбой.
+
+    Павел штатно жмёт Stop, чтобы пересобрать или переставить билд. Если такой
+    прогон не попадает в историю, его кадры не лягут на график, ради которого
+    история и ведётся.
+    """
+    from brm.core.history import HistoryStore
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    history_store = HistoryStore(tmp_path / "history.db")
+    builder = FakePlanBuilder(tmp_path, base_frames=list(range(1, 31)), delay=0.3)
+    window = make_window(
+        store, caps_loader=caps_loader, project_loader=project_loader, fake_builder=builder, monkeypatch=monkeypatch
+    )
+    window.history_store = history_store
+    load_project(qapp, window, blend_file)
+    window.project_panel.resume_check.setChecked(False)
+
+    window.start_render()
+    wait_until(qapp, lambda: window.runner.tracker is not None and window.runner.tracker.progress.frames_done_count >= 1)
+    window.stop_render()
+    wait_until(qapp, lambda: window.runner.status is not None, timeout=30)
+    assert window.runner.status == "stopped"
+
+    entries = history_store.list_entries()
+    assert len(entries) == 1, [line for line in window.log_view.lines() if "history" in line]
+    assert entries[0].status == "stopped"
+    assert 1 <= entries[0].frames_done < 30  # успел не всё, и это записано честно
+    assert entries[0].stats_path
