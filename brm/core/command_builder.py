@@ -45,7 +45,10 @@ def build_argv(
     threads: int | None = None,
     factory_startup: bool = False,
     cycles_device: str | None = None,
-    cycles_print_stats: bool = True,
+    # По умолчанию выключено: таблица текстур занимает ~330 строк на кадр,
+    # раздувает лог и врезается в строки прогресса. Устройство и так видно
+    # в логе по строкам [BRM] от override-скрипта.
+    cycles_print_stats: bool = False,
 ) -> list[str]:
     """Список аргументов. Никакой сборки строкой: пути с пробелами и кириллицей."""
     argv = [str(blender_path), "-b"]

@@ -63,7 +63,8 @@ def test_plan_for_cycles_uses_best_device_and_overrides(caps: Capabilities, proj
     plan = build_render_plan(job, caps, AppSettings(), project, tmp_dir=tmp_path)
     assert plan.frames == [12]
     assert plan.engine == "CYCLES" and plan.cycles_device == "OPTIX"
-    assert plan.argv[-4:] == ["--", "--cycles-device", "OPTIX", "--cycles-print-stats"]
+    # Статистика Cycles больше не запрашивается: она врезалась в строки прогресса.
+    assert plan.argv[-3:] == ["--", "--cycles-device", "OPTIX"]
     assert plan.argv[plan.argv.index("--render-frame") + 1] == "12"
     assert plan.override_settings["engine"] == "CYCLES"
     assert plan.override_settings["compute_device_type"] == "OPTIX"

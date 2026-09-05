@@ -1535,3 +1535,41 @@ def test_scene_analysis_shows_numbers_and_survives_failure(
     wait_until(qapp, lambda: window._analysis_task is None, timeout=15)
     assert "blender exploded" in dialog.status_label.text()
     assert window.render_button.isEnabled()  # неудачный анализ не ломает рендер
+
+
+# --- отзыв по билду 3001 -----------------------------------------------------------
+
+
+def test_scene_and_layer_rows_hide_when_there_is_nothing_to_choose(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Отзыв: «не совсем ясно, зачем эта зона нужна». В файле одна сцена и один слой."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    panel = window.project_panel
+    assert panel.scene_label.isHidden() and panel.scene_combo.isHidden()
+    assert panel.view_layer_label.isHidden() and panel.view_layer_combo.isHidden()
+    # Задача всё равно знает сцену и слой: скрыт только выбор, а не значение.
+    job = window.compose_job()
+    assert job is not None and job.scene == "Scene"
+
+
+def test_scene_row_comes_back_when_the_file_has_several(
+    qapp, configured_store: SettingsStore, caps_loader, fixtures_dir: Path, blend_file: Path
+) -> None:
+    data = json.loads((fixtures_dir / PROJECT_FIXTURE).read_text(encoding="utf-8"))
+    second = json.loads(json.dumps(data["scenes"][0]))
+    second["name"] = "Scene Extra"
+    data["scenes"].append(second)
+
+    def loader(blender_path: str, blend_path: str, *, cancel) -> ProjectInfo:
+        info = ProjectInfo.model_validate(data)
+        info.file_path = blend_path
+        return info
+
+    window = MainWindow(configured_store, capabilities_loader=caps_loader, project_loader=loader)
+    load_project(qapp, window, blend_file)
+    panel = window.project_panel
+    assert not panel.scene_label.isHidden() and not panel.scene_combo.isHidden()
+    assert panel.scene_combo.count() == 2

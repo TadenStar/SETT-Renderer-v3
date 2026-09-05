@@ -171,3 +171,30 @@ def test_stats_dict_and_write(tmp_path: Path, logs_dir: Path) -> None:
     assert loaded["frames_done"] == [1, 2, 3]
     assert loaded["frame_stats"][0]["render_time_s"] == 0.19
     assert loaded["engine"] == "EEVEE"
+
+
+def test_frames_are_counted_when_output_is_glued_to_the_log() -> None:
+    """Регрессия с реального рендера: счётчик кадров стоял на нуле.
+
+    Таблица --cycles-print-stats врезалась в строку «Saved:», та переставала
+    начинаться с начала строки, и трекер не засчитывал ни одного кадра —
+    ни прогресса, ни ETA, ни точек на графике.
+    """
+    lines = [
+        "00:00.100  render           | Fra: 0 | Mem: 2303M | Sample 1/128",
+        r"        brick.jpg   16.00M (16,777,200:20.234  render           | Saved: 'C:\out\0000.jpg'",
+        "00:20.234  render           | Time: 00:19.28 (Saving: 00:00.14)",
+        "00:20.300  render           | Fra: 1 | Mem: 2316M | Sample 1/128",
+        r"        wood.png    64.00M (67,108,800:36.187  render           | Saved: 'C:\out\0001.jpg'",
+        "00:36.187  render           | Time: 00:15.95 (Saving: 00:00.05)",
+    ]
+    tracker = RenderTracker(range(0, 3))
+    for line in lines:
+        tracker.feed(line)
+
+    progress = tracker.progress
+    assert progress.frames_done == [0, 1]
+    assert progress.frames_done_count == 2
+    # Время кадра тоже доезжает: без Saved оно раньше отбрасывалось.
+    assert [round(t, 2) for _, t in progress.frame_times()] == [19.28, 15.95]
+    assert progress.eta_seconds() is not None
