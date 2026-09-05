@@ -24,6 +24,12 @@ from brm.core.storage import app_data_dir
 log = logging.getLogger(__name__)
 
 BUILTIN_PRESETS_DIR = package_root() / "brm" / "resources" / "presets"
+# Третья строка списка: место, где пользователь собирает свои настройки, чтобы
+# потом сохранить их под именем. Значения живут в AppSettings.manual_overrides,
+# а не в файле: файл появляется только когда пресету дали имя.
+MANUAL_PRESET_NAME = "Manual"
+# Между встроенными (10, 20) и именованными пользовательскими (200).
+MANUAL_ORDER = 50
 EEVEE_ALIAS = "EEVEE"
 
 
@@ -178,6 +184,20 @@ def preset_from_overrides(name: str, overrides: dict[str, Any], *, description: 
         output=OutputSettings.model_validate(output),
         **sections,
     )
+
+
+def manual_preset(overrides: dict[str, Any] | None = None) -> Preset:
+    """Пресет «Manual» из текущих значений пользователя. Пустой — всё берётся из сцены."""
+    preset = preset_from_overrides(
+        MANUAL_PRESET_NAME,
+        dict(overrides or {}),
+        description="Your own settings. Tune them here, then Save as… to keep them under a name.",
+    )
+    return preset.model_copy(update={"order": MANUAL_ORDER})
+
+
+def is_manual(preset: Preset | None) -> bool:
+    return preset is not None and preset.name == MANUAL_PRESET_NAME
 
 
 def save_user_preset(preset: Preset, user_dir: str | os.PathLike[str] | None = None) -> Path:

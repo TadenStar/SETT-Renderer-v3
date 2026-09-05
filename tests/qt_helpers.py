@@ -10,7 +10,9 @@ from brm.core.command_builder import command_line
 from brm.core.render_plan import RenderPlan
 
 
-def wait_until(qapp, predicate: Callable[[], bool], timeout: float = 5.0) -> None:
+# Запас на загруженную машину: во время настоящего рендера Cycles очередь
+# событий Qt разбирается заметно медленнее, и пять секунд стали мигать.
+def wait_until(qapp, predicate: Callable[[], bool], timeout: float = 15.0) -> None:
     """Крутит цикл событий, пока условие не выполнится: сигналы из потоков и процессов идут через очередь."""
     deadline = time.monotonic() + timeout
     while not predicate():

@@ -57,11 +57,14 @@ from brm.core.preset_resolver import (
 )
 from brm.core.preview import describe_unpreviewable, is_previewable, latest_rendered_frame
 from brm.core.presets import (
+    MANUAL_PRESET_NAME,
     Preset,
     PresetError,
     delete_user_preset,
     find_preset,
+    is_manual,
     load_presets,
+    manual_preset,
     preset_from_overrides,
     save_user_preset,
 )
@@ -166,7 +169,14 @@ class MainWindow(QMainWindow):
         self._analysis_dialog: AnalysisDialog | None = None
         self._analysis_task: FunctionTask | None = None
 
-        self.presets: list[Preset] = load_presets()
+        self.presets: list[Preset] = self._all_presets()
+        # С какого пресета ушли: нужен, чтобы наполнить пустой Manual.
+        self._previous_preset: str | None = self.settings.last_preset
+        # Правки копятся и сохраняются пачкой: спинбоксы шлют сигнал на каждый шаг.
+        self._manual_save_timer = QTimer(self)
+        self._manual_save_timer.setInterval(400)
+        self._manual_save_timer.setSingleShot(True)
+        self._manual_save_timer.timeout.connect(self._flush_manual)
         self.resolved_preset: ResolvedPreset | None = None
         # Железо: пока проба не пришла — пустой объект, подстройка ничего не трогает.
         self._hardware_detector = hardware_detector or detect_hardware
@@ -197,6 +207,7 @@ class MainWindow(QMainWindow):
         self.settings_form.save_preset_requested.connect(self.save_current_as_preset)
         self.settings_form.delete_preset_requested.connect(self.delete_selected_preset)
         self.settings_form.expert_requested.connect(self.show_expert_settings)
+        self.settings_form.values_changed.connect(self._on_values_changed)
         self.settings_form.set_compute_mode(self.settings.compute_mode)
         self.settings_form.compute_changed.connect(self._on_compute_mode_changed)
         self.project_panel.scene_combo.currentTextChanged.connect(lambda _name: self.refresh_resolved_preset())
@@ -441,10 +452,51 @@ class MainWindow(QMainWindow):
         return find_preset(self.presets, self.settings_form.current_preset_name())
 
     def _on_preset_changed(self, name: str) -> None:
+        if name == MANUAL_PRESET_NAME and not self.settings.manual_overrides:
+            self._seed_manual_from(self._previous_preset)
+        self._previous_preset = name
         if name != self.settings.last_preset:
             self.settings = self.settings.model_copy(update={"last_preset": name})
             self._store.save(self.settings)
         self.refresh_resolved_preset()
+
+    def _seed_manual_from(self, preset_name: str | None) -> None:
+        """Пустой Manual наполняется значениями пресета, с которого на него ушли.
+
+        Иначе переход на Manual означал бы «сбросить всё», а он задуман как
+        отправная точка для своего пресета, а не как чистый лист.
+        """
+        source = find_preset(self.presets, preset_name)
+        if source is None or self.capabilities is None or self.project is None:
+            return
+        scene = self.project.scene(self.project_panel.scene_combo.currentText()) or self.project.default_scene()
+        if scene is None:
+            return
+        resolved = resolve_preset(source, self.capabilities, scene.engine, scene_percentage=scene.resolution_percentage)
+        self._store_manual(compose_overrides(resolved))
+
+    def _store_manual(self, overrides: dict) -> None:
+        if overrides == self.settings.manual_overrides:
+            return
+        self.settings = self.settings.model_copy(update={"manual_overrides": dict(overrides)})
+        self._store.save(self.settings)
+        self.presets = self._all_presets()
+
+    def _on_values_changed(self) -> None:
+        """Правки в Manual запоминаются: он и есть черновик будущего пресета."""
+        if self.settings_form.current_preset_name() != MANUAL_PRESET_NAME:
+            return
+        self._manual_save_timer.start()
+
+    def _flush_manual(self) -> None:
+        if self.settings_form.current_preset_name() != MANUAL_PRESET_NAME:
+            return
+        resolved = self.resolved_preset
+        base = dict(resolved.assignments) if resolved is not None else {}
+        base.update(self.settings_form.custom_values())
+        for path in self.settings_form.untouched_paths():
+            base.pop(path, None)
+        self._store_manual(base)
 
     # --- анализ сцены ----------------------------------------------------------------
 
@@ -575,8 +627,14 @@ class MainWindow(QMainWindow):
         self.reload_presets()
         self.log_view.set_status(f"Preset {preset.name} deleted", "ok")
 
+    def _all_presets(self) -> list[Preset]:
+        """Встроенные, Manual и сохранённые пользователем — в одном списке."""
+        presets = [p for p in load_presets() if not is_manual(p)]
+        presets.append(manual_preset(self.settings.manual_overrides))
+        return sorted(presets, key=lambda p: (p.order, p.name.lower()))
+
     def reload_presets(self, select: str | None = None) -> None:
-        self.presets = load_presets()
+        self.presets = self._all_presets()
         target = select or self.settings_form.current_preset_name() or self.settings.last_preset
         self.settings_form.set_presets(self.presets, target)
         self.refresh_resolved_preset()
