@@ -1135,12 +1135,12 @@ def test_tiles_can_be_switched_off_from_the_simple_form(
 def test_only_three_choices_are_offered(
     qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
 ) -> None:
-    """Отзыв: «список пресетов включает огромное количество ненужных»."""
+    """Отзыв: «по факту необходимы лишь три пресета» — Draft, Super и свой."""
     window = _ready_window(
         qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
     )
     combo = window.settings_form.preset_combo
-    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super", "Manual"]
 
 
 def test_super_warns_that_a_frame_is_slow(
@@ -1183,7 +1183,7 @@ def test_save_and_delete_your_own_preset_from_the_form(
     window.save_current_as_preset()
 
     combo = window.settings_form.preset_combo
-    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super", "Cave look"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super", "Manual", "Cave look"]
     assert combo.currentData() == "Cave look"
     assert window.settings_form.delete_preset_button.isEnabled()  # своё удалять можно
 
@@ -1191,7 +1191,7 @@ def test_save_and_delete_your_own_preset_from_the_form(
         main_window_mod.QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
     )
     window.delete_selected_preset()
-    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super", "Manual"]
 
 
 def test_builtin_presets_cannot_be_deleted(
@@ -1203,7 +1203,7 @@ def test_builtin_presets_cannot_be_deleted(
     assert not window.settings_form.delete_preset_button.isEnabled()
     window.delete_selected_preset()  # ничего не делает и не падает
     combo = window.settings_form.preset_combo
-    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super", "Manual"]
 
 
 def test_saving_over_a_builtin_name_is_refused(
@@ -1218,7 +1218,7 @@ def test_saving_over_a_builtin_name_is_refused(
     window.save_current_as_preset()
     assert "built-in" in window.log_view.status_label.text()
     combo = window.settings_form.preset_combo
-    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super"]
+    assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super", "Manual"]
 
 
 # --- упрощение главного экрана ----------------------------------------------------
@@ -1573,3 +1573,73 @@ def test_scene_row_comes_back_when_the_file_has_several(
     panel = window.project_panel
     assert not panel.scene_label.isHidden() and not panel.scene_combo.isHidden()
     assert panel.scene_combo.count() == 2
+
+
+def test_manual_is_the_workbench_for_your_own_presets(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, cycles_project_loader, blend_file: Path, monkeypatch
+) -> None:
+    """Отзыв: «Manual — способ создания собственных пресетов».
+
+    Настроил в Manual, сохранил под именем, позже загрузил и получил всё обратно.
+    """
+    from brm.ui import main_window as main_window_mod
+
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=r"D:\out"))
+    window = _ready_window(
+        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    form = window.settings_form
+    combo = form.preset_combo
+
+    # Пустой Manual наполняется значениями пресета, с которого на него ушли.
+    combo.setCurrentIndex(combo.findData("Super"))
+    super_samples = window.resolved_preset.value("cycles.samples")
+    combo.setCurrentIndex(combo.findData("Manual"))
+    assert store.load().manual_overrides["cycles.samples"] == super_samples
+    assert window.resolved_preset.value("cycles.samples") == super_samples
+
+    # Правка в Manual запоминается и переживает перезапуск.
+    form.rows["samples"].set_mode(MODE_CUSTOM)
+    form.rows["samples"].set_value(96)
+    window._flush_manual()
+    assert store.load().manual_overrides["cycles.samples"] == 96
+
+    # И сохраняется под своим именем со всеми настройками.
+    monkeypatch.setattr(main_window_mod.QInputDialog, "getText", staticmethod(lambda *a, **k: ("RM-Cycles", True)))
+    window.save_current_as_preset()
+    saved = next(p for p in window.presets if p.name == "RM-Cycles")
+    assert saved.cycles["cycles.samples"] == 96
+    assert combo.currentData() == "RM-Cycles"
+
+
+def test_manual_cannot_be_deleted(
+    qapp, configured_store: SettingsStore, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Manual — всегда третья строка списка, а не сохранённый файл."""
+    window = _ready_window(
+        qapp, configured_store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    combo = window.settings_form.preset_combo
+    combo.setCurrentIndex(combo.findData("Manual"))
+    assert not window.settings_form.delete_preset_button.isEnabled()
+
+
+def test_editing_outside_manual_does_not_touch_it(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, cycles_project_loader, blend_file: Path
+) -> None:
+    """Правка поверх Draft остаётся правкой поверх Draft и никуда не перескакивает."""
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=r"D:\out"))
+    window = _ready_window(
+        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    form = window.settings_form
+    form.preset_combo.setCurrentIndex(form.preset_combo.findData("Draft"))
+    form.rows["samples"].set_mode(MODE_CUSTOM)
+    form.rows["samples"].set_value(17)
+    window._flush_manual()
+
+    assert form.current_preset_name() == "Draft"
+    assert store.load().manual_overrides == {}
+    assert window.compose_job().overrides["cycles.samples"] == 17

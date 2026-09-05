@@ -40,7 +40,7 @@ from brm.core.capabilities import (
     Capabilities,
 )
 from brm.core.preset_resolver import FILE_FORMAT_PATH, ResolvedPreset
-from brm.core.presets import Preset
+from brm.core.presets import MANUAL_PRESET_NAME, Preset
 from brm.ui.expert_form import ExpertForm
 from brm.ui.field_modes import MODE_CUSTOM, MODE_PRESET, MODE_SKIP
 from brm.ui.theme import set_role
@@ -515,8 +515,10 @@ class SettingsForm(QGroupBox):
         warning = preset.warning if preset else ""
         self.warning_label.setText(warning)
         self.warning_label.setVisible(bool(warning))
-        # Встроенные пресеты удалять нельзя: они лежат в дистрибутиве.
-        self.delete_preset_button.setEnabled(preset is not None and not preset.builtin)
+        # Встроенные удалять нельзя (лежат в дистрибутиве), Manual — тоже:
+        # он всегда третья строка списка, а не сохранённый пресет.
+        deletable = preset is not None and not preset.builtin and preset.name != MANUAL_PRESET_NAME
+        self.delete_preset_button.setEnabled(deletable)
 
     def current_preset(self) -> Preset | None:
         name = self.current_preset_name()

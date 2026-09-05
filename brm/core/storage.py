@@ -11,7 +11,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -45,6 +45,9 @@ class AppSettings(BaseModel):
     recent_projects: list[str] = Field(default_factory=list)
     # Последний выбранный пресет рендера и кодека.
     last_preset: str = "Draft"
+    # Значения пресета «Manual»: путь свойства → значение. Хранятся здесь, потому
+    # что это черновик, а не именованный пресет; именем он становится в Save as…
+    manual_overrides: dict[str, Any] = Field(default_factory=dict)
     last_video_preset: str = "H.264"
     # Собирать видео сразу после успешного рендера (M6).
     auto_build_video: bool = False
