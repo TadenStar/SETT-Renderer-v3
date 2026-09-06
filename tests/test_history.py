@@ -205,3 +205,63 @@ def test_delete_one_entry_and_clear_everything(tmp_path: Path) -> None:
     assert store.clear() == 2
     assert store.list_entries() == []
     assert store.clear() == 0
+
+
+def test_applied_settings_are_recorded_for_later_analysis(tmp_path: Path) -> None:
+    """Павел собирает историю ради автонастройки: без настроек время кадра не с чем сопоставить."""
+    stats = make_stats(
+        overrides={
+            "cycles.samples": 128,
+            "cycles.denoiser": "DLSS",
+            "render.resolution_percentage": 75,
+            "cycles.adaptive_threshold": 0.03,
+        },
+        cycles_device="OPTIX",
+        hardware="NVIDIA GeForce RTX 5070 Laptop GPU (8 GB VRAM) · 31 GB RAM · 24 threads",
+    )
+    entry = entry_from_stats(stats, tmp_path / "stats.json")
+    assert entry.samples == 128 and entry.resolution_percentage == 75
+    assert entry.denoiser == "DLSS" and entry.device == "OPTIX"
+    assert "RTX 5070" in entry.hardware
+    assert json.loads(entry.settings_json)["cycles.adaptive_threshold"] == 0.03
+
+    store = HistoryStore(tmp_path / "history.db")
+    store.record(entry)
+    loaded = store.list_entries()[0]
+    assert (loaded.samples, loaded.denoiser, loaded.device) == (128, "DLSS", "OPTIX")
+
+
+def test_a_render_without_overrides_still_records(tmp_path: Path) -> None:
+    """Пресет мог ничего не навязывать — это не повод терять запись."""
+    entry = entry_from_stats(make_stats(), tmp_path / "stats.json")
+    assert entry.samples is None and entry.denoiser is None and entry.settings_json is None
+    store = HistoryStore(tmp_path / "history.db")
+    store.record(entry)
+    assert len(store.list_entries()) == 1
+
+
+def test_an_old_database_gets_the_new_columns(tmp_path: Path) -> None:
+    """История копится месяцами: обновление приложения не должно её терять."""
+    import sqlite3
+
+    path = tmp_path / "history.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE renders (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,"
+        " finished_at TEXT NOT NULL, blend_path TEXT NOT NULL, project TEXT NOT NULL, scene TEXT,"
+        " preset TEXT, engine TEXT, status TEXT NOT NULL, frames_total INTEGER NOT NULL,"
+        " frames_done INTEGER NOT NULL, duration_s REAL NOT NULL, avg_frame_time_s REAL,"
+        " peak_mem_mb REAL, log_path TEXT, stats_path TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO renders (started_at, finished_at, blend_path, project, status, frames_total,"
+        " frames_done, duration_s, stats_path) VALUES ('a','b','c','d','success',1,1,1.0,'s')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = HistoryStore(path)
+    entries = store.list_entries()
+    assert len(entries) == 1 and entries[0].samples is None  # старая запись цела
+    store.record(entry_from_stats(make_stats(overrides={"cycles.samples": 64}), tmp_path / "new.json"))
+    assert {e.samples for e in store.list_entries()} == {None, 64}

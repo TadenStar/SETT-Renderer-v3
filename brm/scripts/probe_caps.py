@@ -74,8 +74,11 @@ def _resolve(root, path):
 # Enum, чьи элементы Blender строит динамически (зависят от устройств и версии):
 # статически они пустые. Кандидаты проверяются присваиванием, остаются только принятые.
 DYNAMIC_ENUM_CANDIDATES = {
-    "denoiser": ["OPENIMAGEDENOISE", "OPTIX"],
-    "preview_denoiser": ["AUTO", "OPENIMAGEDENOISE", "OPTIX"],
+    # DLSS появился в экспериментальных сборках 5.3: статический список денойзеров
+    # там пустой, и узнать о нём можно только пробным присваиванием. На 5.0.1
+    # присваивание не проходит, и в списке останутся OIDN с OptiX.
+    "denoiser": ["DLSS", "OPENIMAGEDENOISE", "OPTIX"],
+    "preview_denoiser": ["DLSS", "AUTO", "OPENIMAGEDENOISE", "OPTIX"],
     "sampling_pattern": [
         "AUTOMATIC",
         "SOBOL_BURLEY",

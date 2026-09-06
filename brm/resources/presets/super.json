@@ -27,6 +27,7 @@
   "cycles.use_denoising": true,
   "cycles.denoiser": {
    "prefer": [
+    "DLSS",
     "OPENIMAGEDENOISE",
     "OPTIX"
    ]
@@ -52,7 +53,8 @@
   "cycles.volume_step_rate": 1.0,
   "cycles.volume_max_steps": 1024,
   "cycles.volume_preview_step_rate": 4.0,
-  "cycles.seed": 0
+  "cycles.seed": 0,
+  "cycles.dlss_preset": "D"
  },
  "eevee": {
   "eevee.taa_render_samples": 192,

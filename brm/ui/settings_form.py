@@ -92,6 +92,10 @@ PARAMS: tuple[ParamSpec, ...] = (
     ParamSpec("threshold", "Noise threshold", "cycles.adaptive_threshold", None, "float", 0.0, 1.0, decimals=3, step=0.005),
     ParamSpec("bounces", "Max bounces", "cycles.max_bounces", None, "int", 0, 64),
     ParamSpec("denoise", "Denoise", "cycles.use_denoising", None, "bool"),
+    # Список денойзеров приходит из пробы конкретного бинарника: в 5.3 там
+    # появляется DLSS, в 5.0.1 его нет. Пустой choices — заполняется из capabilities.
+    ParamSpec("denoiser", "Denoiser", "cycles.denoiser", None, "enum"),
+    ParamSpec("dlss_preset", "DLSS model", "cycles.dlss_preset", None, "enum"),
     ParamSpec("time_limit", "Time limit per frame, s", "cycles.time_limit", None, "int", 0, 86400),
     ParamSpec("resolution", "Resolution %", "render.resolution_percentage", "render.resolution_percentage", "int", 1, 400),
     ParamSpec("persistent", "Persistent Data", "render.use_persistent_data", "render.use_persistent_data", "bool"),
@@ -335,13 +339,17 @@ class SettingsForm(QGroupBox):
 
         simple_page = QWidget(self)
         self.rows: dict[str, ParamRow] = {}
-        simple_form = QFormLayout(simple_page)
-        simple_form.setContentsMargins(0, 0, 0, 0)
-        for spec in PARAMS:
+        self._simple_form = QFormLayout(simple_page)
+        self._simple_form.setContentsMargins(0, 0, 0, 0)
+        # Номер строки нужен, чтобы прятать её вместе с подписью: свойства,
+        # которых нет в выбранном Blender, показывать незачем (правило 3).
+        self._row_index: dict[str, int] = {}
+        for index, spec in enumerate(PARAMS):
             row = ParamRow(spec, simple_page)
             row.changed.connect(self.values_changed)
             self.rows[spec.key] = row
-            simple_form.addRow(f"{spec.label}:", row)
+            self._row_index[spec.key] = index
+            self._simple_form.addRow(f"{spec.label}:", row)
 
         # Экспертная форма живёт здесь, а показывается в отдельном окне: сотни
         # свойств на главном экране пугали больше, чем помогали.
@@ -368,6 +376,8 @@ class SettingsForm(QGroupBox):
         layout.addLayout(device_row)
         layout.addLayout(view_row)
         layout.addWidget(self.stack, 1)
+        # До пробы Blender мы не знаем, какие денойзеры есть: строки скрыты.
+        self._sync_dynamic_rows()
         layout.addWidget(self.skipped_label)
 
     # --- публичное API ---------------------------------------------------------
@@ -454,6 +464,29 @@ class SettingsForm(QGroupBox):
     def set_capabilities(self, caps: Capabilities | None) -> None:
         self._caps = caps
         self.expert_form.set_capabilities(caps)
+        self._sync_dynamic_rows()
+
+    def _sync_dynamic_rows(self) -> None:
+        """Варианты и видимость строк, которые зависят от версии Blender.
+
+        Список денойзеров и модели DLSS приходят из пробы бинарника: в 5.3
+        там есть DLSS и dlss_preset, в 5.0.1 — только OIDN с OptiX. Свойства,
+        которых в этой сборке нет, прячутся целиком вместе с подписью.
+        """
+        for key, identifier in (("denoiser", "denoiser"), ("dlss_preset", "dlss_preset")):
+            prop = self._caps.property("cycles", identifier) if self._caps is not None else None
+            choices = prop.enum_identifiers() if prop is not None else []
+            self.rows[key].set_choices(choices)
+            self._set_row_visible(key, bool(choices))
+
+    def _set_row_visible(self, key: str, visible: bool) -> None:
+        index = self._row_index.get(key)
+        if index is not None:
+            self._simple_form.setRowVisible(index, visible)
+
+    def row_visible(self, key: str) -> bool:
+        index = self._row_index.get(key)
+        return bool(index is not None and self._simple_form.isRowVisible(index))
 
     def set_engine(self, engine: str | None) -> None:
         self._engine = engine

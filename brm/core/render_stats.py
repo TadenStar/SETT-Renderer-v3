@@ -46,6 +46,9 @@ class FrameStat:
 class RenderProgress:
     frames_expected: list[int] = field(default_factory=list)
     frames_done: list[int] = field(default_factory=list)
+    # Blender компилирует ядра: на свежих материалах это минуты, в течение
+    # которых нет ни сэмплов, ни кадров, и приложение выглядит зависшим.
+    compiling_kernels: bool = False
     current_frame: int | None = None
     sample: int | None = None
     samples_total: int | None = None
@@ -121,6 +124,11 @@ class RenderTracker:
         event = parse_line(line)
         progress = self.progress
         kind = event.kind
+        if event.compiling_kernels:
+            progress.compiling_kernels = True
+        elif event.sample is not None or kind == KIND_SAVED:
+            # Пошли сэмплы или сохранился кадр — значит ядра уже собраны.
+            progress.compiling_kernels = False
         if kind == KIND_BRM:
             progress.brm_lines.append(event.raw)
         elif kind == KIND_ERROR:

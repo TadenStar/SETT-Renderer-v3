@@ -9,6 +9,12 @@ from PySide6.QtWidgets import QGroupBox, QLabel, QProgressBar, QVBoxLayout, QWid
 from brm.core.render_stats import RenderProgress, format_duration, format_memory
 from brm.core.frame_chart import ROLE_CURRENT, ChartSeries
 from brm.ui.frame_chart import FrameChart
+
+KERNEL_HINT_MARK = "render kernels"
+KERNEL_HINT = (
+    "Building render kernels — the first frame of a new scene can take minutes. "
+    "Later renders of the same materials reuse the cache."
+)
 from brm.ui.theme import set_role
 
 
@@ -86,6 +92,20 @@ class ProgressPanel(QGroupBox):
             parts.append(note)
         self.status_label.setText(" · ".join(parts))
         set_role(self.status_label, "")
+
+        # Компиляция ядер занимает минуты на свежих материалах: в это время нет
+        # ни сэмплов, ни кадров, и без подсказки рендер выглядит зависшим.
+        # На тестовой сцене из 40 материалов это заняло 4 минуты 31 секунду
+        # против 2 секунд самого кадра.
+        if progress.compiling_kernels:
+            self.hint_label.setText(KERNEL_HINT)
+            set_role(self.hint_label, "warning")
+            self.hint_label.show()
+        elif KERNEL_HINT_MARK in self.hint_label.text():
+            # Прячем только свою подсказку: подсказку о причине падения ставит
+            # set_finished, и затирать её нельзя.
+            self.hint_label.setText("")
+            self.hint_label.hide()
 
         details = [f"Elapsed {format_duration(elapsed_s)}"]
         eta = progress.eta_seconds()

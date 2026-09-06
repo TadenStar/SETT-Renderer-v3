@@ -427,3 +427,50 @@ def test_scene_analysis_on_a_real_file(real_blender: str, tiny_blend: Path, tmp_
     assert stats.evaluated_objects >= 1 and stats.instances >= 0
     assert "MESH" in stats.objects_by_type
     assert "objects" in stats.summary() and "triangles" in stats.summary()
+
+
+def test_denoiser_list_comes_from_the_binary(real_blender: str, tmp_path: Path) -> None:
+    """Список денойзеров — только из пробы: статический RNA его не отдаёт.
+
+    В 5.3 туда попадает DLSS, в 5.0.1 — нет. Форма строится по этому списку,
+    поэтому он должен быть правдой про конкретный бинарник (правило 3).
+    """
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=900)
+    prop = caps.property("cycles", "denoiser")
+    assert prop is not None
+    denoisers = prop.enum_identifiers()
+    assert "OPENIMAGEDENOISE" in denoisers  # есть в любой сборке Cycles
+    # DLSS и dlss_preset появляются вместе: одно без другого — признак,
+    # что проба соврала про возможности сборки.
+    assert ("DLSS" in denoisers) == (caps.property("cycles", "dlss_preset") is not None)
+
+
+def test_dlss_is_applied_when_the_build_supports_it(real_blender: str, tiny_blend: Path, tmp_path: Path) -> None:
+    """DLSS доезжает до Blender целиком: и денойзер, и модель Ray Reconstruction."""
+    caps = get_capabilities(real_blender, cache_dir=tmp_path / "cache", tmp_dir=tmp_path / "tmp", timeout=900)
+    prop = caps.property("cycles", "denoiser")
+    if prop is None or "DLSS" not in prop.enum_identifiers():
+        pytest.skip("This Blender has no DLSS denoiser; set BRM_BLENDER to a build that does")
+
+    info = probe_project(real_blender, tiny_blend, tmp_dir=tmp_path / "tmp", timeout=300)
+    job = RenderJob(
+        blend_path=str(tiny_blend),
+        engine="CYCLES",
+        frame_range=FrameRange(mode=FrameRangeMode.SINGLE, frame=1),
+        overrides={
+            "cycles.samples": 8,
+            "cycles.use_denoising": True,
+            "cycles.denoiser": "DLSS",
+            "cycles.dlss_preset": "D",
+            "render.resolution_x": 128,
+            "render.resolution_y": 128,
+        },
+    )
+    plan = build_render_plan(job, caps, AppSettings(default_output_dir=str(tmp_path / "out")), info, tmp_dir=tmp_path / "tmp")
+    result = run_blender(plan.argv[0], plan.argv[1:], timeout=1800)
+    assert result.ok, result.tail(60)
+    brm = result.brm_lines()
+    assert not [line for line in brm if line.startswith("[BRM] FAIL")], brm
+    assert "[BRM] OK   cycles.denoiser = 'DLSS'" in brm
+    assert "[BRM] OK   cycles.dlss_preset = 'D'" in brm
+    assert (plan.output_dir / "0001.png").is_file()

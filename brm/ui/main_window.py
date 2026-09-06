@@ -42,6 +42,7 @@ from brm.core.ffmpeg import (
 from dataclasses import replace
 
 from brm.core.frame_chart import build_series
+from brm.core.frame_range import resolve_frames
 from brm.core.history import HistoryEntry, HistoryStore, read_frame_times
 from brm.core.job_runner import RUN_FAILED, RUN_PAUSED, RUN_STOPPED, RUN_SUCCESS, JobRunner
 from brm.core.log_parser import KIND_OTHER, KIND_SAVED
@@ -55,6 +56,7 @@ from brm.core.preset_resolver import (
     resolve_engine,
     resolve_preset,
 )
+from brm.core.output_scan import extension_for_format, scan_output
 from brm.core.preview import describe_unpreviewable, is_previewable, latest_rendered_frame
 from brm.core.presets import (
     MANUAL_PRESET_NAME,
@@ -177,6 +179,11 @@ class MainWindow(QMainWindow):
         self._manual_save_timer.setInterval(400)
         self._manual_save_timer.setSingleShot(True)
         self._manual_save_timer.timeout.connect(self._flush_manual)
+        # Пересчёт пропуска кадров ходит на диск, поэтому не на каждый щелчок спинбокса.
+        self._resume_preview_timer = QTimer(self)
+        self._resume_preview_timer.setInterval(250)
+        self._resume_preview_timer.setSingleShot(True)
+        self._resume_preview_timer.timeout.connect(self.refresh_resume_preview)
         self.resolved_preset: ResolvedPreset | None = None
         # Железо: пока проба не пришла — пустой объект, подстройка ничего не трогает.
         self._hardware_detector = hardware_detector or detect_hardware
@@ -315,6 +322,7 @@ class MainWindow(QMainWindow):
         self.project_panel.file_requested.connect(self.open_project)
         self.project_panel.safety_requested.connect(self.show_safety)
         self.project_panel.analysis_requested.connect(self.analyze_scene)
+        self.project_panel.job_changed.connect(self._on_job_inputs_changed)
         self.settings_form = SettingsForm()
         self.progress_panel = ProgressPanel()
         self.log_view = LogView()
@@ -497,6 +505,53 @@ class MainWindow(QMainWindow):
         for path in self.settings_form.untouched_paths():
             base.pop(path, None)
         self._store_manual(base)
+
+    # --- предпросмотр пропуска кадров ------------------------------------------------
+
+    def _on_job_inputs_changed(self) -> None:
+        self._resume_preview_timer.start()
+
+    def refresh_resume_preview(self) -> None:
+        """Сколько кадров уже на диске и какой диапазон реально уйдёт в Blender.
+
+        Без этой строки команда с ``-s 122`` выглядела как ошибка приложения:
+        пропуск объявлялся только в финальном сообщении, когда рендер уже прошёл.
+        """
+        panel = self.project_panel
+        job = panel.current_job()
+        if job is None or self.project is None:
+            panel.set_resume_note("")
+            return
+        scene = self.project.scene(job.scene) or self.project.default_scene()
+        if scene is None:
+            panel.set_resume_note("")
+            return
+        try:
+            frames = resolve_frames(job.frame_range, scene_start=scene.frame_start, scene_end=scene.frame_end)
+        except ValueError:
+            panel.set_resume_note("")
+            return
+        if not job.resume:
+            panel.set_resume_note(f"Resume off: all {len(frames)} frame(s) will be rendered again", "muted")
+            return
+
+        composed = self.compose_job() or job
+        extension = extension_for_format(composed.file_format)
+        scan = scan_output(
+            resolve_output_path(job, self.settings, scene.name),
+            frames,
+            extensions=[extension] if extension else None,
+        )
+        todo = scan.missing(frames, min_size_bytes=job.min_frame_kb * 1024)
+        skipped = len(frames) - len(todo)
+        if not skipped:
+            panel.set_resume_note(f"Nothing on disk yet: all {len(frames)} frame(s) will be rendered", "muted")
+        elif not todo:
+            panel.set_resume_note(f"All {len(frames)} frame(s) are already on disk — nothing to render", "warning")
+        else:
+            panel.set_resume_note(
+                f"{skipped} frame(s) already on disk · rendering {len(todo)} ({todo[0]}..{todo[-1]})", "ok"
+            )
 
     # --- анализ сцены ----------------------------------------------------------------
 
@@ -707,6 +762,8 @@ class MainWindow(QMainWindow):
         )
         self.settings_form.set_engine(self.resolved_preset.engine)
         self.settings_form.show_resolved(self.resolved_preset)
+        # Формат вывода задаёт расширение, по которому ищутся готовые кадры.
+        self._on_job_inputs_changed()
 
     # --- проект ----------------------------------------------------------------
 
@@ -794,6 +851,9 @@ class MainWindow(QMainWindow):
 
     def _launch(self, job: RenderJob, project: ProjectInfo) -> bool:
         assert self.capabilities is not None
+        # Железо попадает в историю вместе с настройками: рекомендации потом
+        # должны быть «под эту машину», а не вообще.
+        self.runner.hardware_summary = self.hardware.summary()
         try:
             self.runner.start(job, self.capabilities, self.settings, project, tmp_dir=tmp_dir())
         except (ValueError, RuntimeError) as exc:
@@ -817,6 +877,15 @@ class MainWindow(QMainWindow):
         self.log_view.set_command(plan.command_line)
         if len(self.runner.plans) == 1:
             self.log_view.append_line(f"[BRM] output: {plan.output_path}")
+            # Пропуск объявляется до рендера, а не в финальном сообщении: команда
+            # с «-s 122» без объяснения выглядит как ошибка приложения.
+            skipped = len(self.runner.skipped_existing)
+            if skipped:
+                frames = self.runner.tracker.progress.frames_expected if self.runner.tracker else []
+                span = f" ({frames[0]}..{frames[-1]})" if frames else ""
+                self.log_view.append_line(
+                    f"[BRM] resume: {skipped} frame(s) already on disk, rendering {len(frames)}{span}"
+                )
             if plan.job.preset:
                 self.log_view.append_line(f"[BRM] preset: {plan.job.preset}, {len(plan.job.overrides)} setting(s)")
             # Что подстроено под железо — в лог рядом с командой: через месяц

@@ -39,9 +39,27 @@ CREATE TABLE IF NOT EXISTS renders (
     avg_frame_time_s REAL,
     peak_mem_mb REAL,
     log_path TEXT,
-    stats_path TEXT NOT NULL
+    stats_path TEXT NOT NULL,
+    samples INTEGER,
+    resolution_percentage INTEGER,
+    denoiser TEXT,
+    device TEXT,
+    hardware TEXT,
+    settings_json TEXT
 )
 """
+
+# Колонки, дописываемые к уже существующей базе. Павел собирает историю ради
+# будущей автонастройки: без записи применённых настроек время кадра не с чем
+# сопоставить, а несобранные данные задним числом не восстановить.
+_ADDED_COLUMNS = (
+    ("samples", "INTEGER"),
+    ("resolution_percentage", "INTEGER"),
+    ("denoiser", "TEXT"),
+    ("device", "TEXT"),
+    ("hardware", "TEXT"),
+    ("settings_json", "TEXT"),
+)
 
 _FIELDS = (
     "started_at",
@@ -59,6 +77,12 @@ _FIELDS = (
     "peak_mem_mb",
     "log_path",
     "stats_path",
+    "samples",
+    "resolution_percentage",
+    "denoiser",
+    "device",
+    "hardware",
+    "settings_json",
 )
 
 
@@ -84,6 +108,14 @@ class HistoryEntry:
     peak_mem_mb: float | None
     log_path: str | None
     stats_path: str
+    # Что было применено к этому рендеру: по этим полям потом строятся
+    # рекомендации «под эту машину и такую сцену».
+    samples: int | None = None
+    resolution_percentage: int | None = None
+    denoiser: str | None = None
+    device: str | None = None
+    hardware: str | None = None
+    settings_json: str | None = None
 
 
 def _average_frame_time(frame_stats: list[dict[str, Any]]) -> float | None:
@@ -104,6 +136,7 @@ def entry_from_stats(data: dict[str, Any], stats_path: str | os.PathLike[str]) -
     frames_done = len(data.get("frames_done", []))
     frame_stats = data.get("frame_stats", [])
     avg = _average_frame_time(frame_stats)
+    overrides = data.get("overrides") or {}
     duration_s = float(data.get("duration_s") or 0.0)
     if avg is None and frames_done:
         avg = duration_s / frames_done
@@ -128,7 +161,27 @@ def entry_from_stats(data: dict[str, Any], stats_path: str | os.PathLike[str]) -
         peak_mem_mb=data.get("peak_mem_mb"),
         log_path=log_path,
         stats_path=stats_path,
+        samples=_as_int(overrides.get("cycles.samples") or overrides.get("eevee.taa_render_samples")),
+        resolution_percentage=_as_int(overrides.get("render.resolution_percentage")),
+        denoiser=_as_text(overrides.get("cycles.denoiser")),
+        device=_as_text(data.get("cycles_device")),
+        hardware=_as_text(data.get("hardware")),
+        settings_json=json.dumps(overrides, ensure_ascii=False) if overrides else None,
     )
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_text(value: Any) -> str | None:
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def read_frame_times(stats_path: str | os.PathLike[str]) -> list[tuple[int, float]]:
@@ -148,6 +201,18 @@ def read_frame_times(stats_path: str | os.PathLike[str]) -> list[tuple[int, floa
     return times
 
 
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Дописывает новые колонки в базу, созданную прошлой версией приложения.
+
+    История копится месяцами, и терять её при обновлении нельзя, поэтому
+    вместо пересоздания таблицы — ALTER TABLE на недостающие колонки.
+    """
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(renders)")}
+    for name, sql_type in _ADDED_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE renders ADD COLUMN {name} {sql_type}")
+
+
 class HistoryStore:
     """Чтение и запись history.db. Битый файл карантинится, как settings.json."""
 
@@ -159,6 +224,7 @@ class HistoryStore:
         conn = sqlite3.connect(str(self.path))
         try:
             conn.execute(_SCHEMA)
+            _add_missing_columns(conn)
             return conn
         except sqlite3.DatabaseError as exc:
             conn.close()  # иначе Windows не даст переименовать открытый файл

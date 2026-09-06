@@ -162,3 +162,21 @@ def test_clean_lines_are_unaffected() -> None:
     assert event.kind == KIND_TIME and event.frame_time_s == 19.28
     assert parse_line("Blender quit").kind == KIND_QUIT
     assert parse_line("some unrelated text").kind == KIND_OTHER
+
+
+def test_kernel_compilation_is_recognised_anywhere_in_the_line() -> None:
+    """Первый рендер сцены со свежими материалами компилирует ядра минутами.
+
+    Сообщение приходит и отдельной строкой, и внутри строки прогресса, поэтому
+    это признак события, а не отдельный вид: номер кадра терять нельзя.
+    """
+    inside = parse_line(
+        "00:03.875  render           | Fra: 122 | Mem: 1251M | Loading denoising kernels (may take a few minutes the first time)"
+    )
+    assert inside.kind == KIND_PROGRESS and inside.frame == 122
+    assert inside.compiling_kernels is True
+
+    alone = parse_line("00:00.100  render           | Loading render kernels (may take a few minutes the first time)")
+    assert alone.compiling_kernels is True
+
+    assert parse_line("00:00.100  render           | Fra: 1 | Sample 1/128").compiling_kernels is False

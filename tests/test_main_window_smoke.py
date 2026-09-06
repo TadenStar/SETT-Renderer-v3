@@ -19,6 +19,8 @@ from brm.core.frame_range import FrameRangeMode
 from brm.core.preview import describe_unpreviewable
 from brm.core.project_probe import ProjectInfo, ProjectProbeError
 from brm.core.queue import QueueStore
+from brm.core.output_scan import extension_for_format
+from brm.core.render_plan import resolve_output_path
 from brm.core.render_stats import FrameStat, RenderProgress
 from brm.core.storage import AppSettings, SettingsStore
 from brm.ui.log_view import LogView
@@ -930,8 +932,6 @@ def test_preview_finds_last_frame_on_disk_without_a_render(
     qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path
 ) -> None:
     """Открыли приложение после ночного рендера: кадров в памяти нет, а на диске есть."""
-    from brm.core.render_plan import resolve_output_path
-
     store = SettingsStore(settings_path)
     store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
     window = make_window(store, caps_loader=caps_loader, project_loader=project_loader)
@@ -1680,3 +1680,142 @@ def test_a_stopped_render_lands_in_the_history(
     assert entries[0].status == "stopped"
     assert 1 <= entries[0].frames_done < 30  # успел не всё, и это записано честно
     assert entries[0].stats_path
+
+
+# --- предпросмотр пропуска кадров (отзыв по билду 3002) ----------------------------
+
+
+def test_resume_says_how_many_frames_are_already_on_disk(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, cycles_project_loader, blend_file: Path, tmp_path: Path
+) -> None:
+    """Отзыв: «в консоль введён диапазон 122..1440, я такого не вводил».
+
+    Это работал resume, но приложение молчало об этом до конца рендера.
+    """
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = _ready_window(
+        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    panel = window.project_panel
+    panel.mode_combo.setCurrentIndex(panel.mode_combo.findData(FrameRangeMode.MANUAL))
+    panel.start_spin.setValue(0)
+    panel.end_spin.setValue(9)
+
+    window.refresh_resume_preview()
+    assert "Nothing on disk yet" in panel.resume_label.text()
+
+    # Кладём первые пять кадров, как их положил бы прошлый прогон.
+    job = panel.current_job()
+    output = Path(resolve_output_path(job, window.settings, "Scene"))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    suffix = extension_for_format(window.compose_job().file_format) or "png"
+    for frame in range(5):
+        (output.parent / f"{frame:04d}.{suffix}").write_bytes(b"x" * 2048)
+
+    window.refresh_resume_preview()
+    note = panel.resume_label.text()
+    assert not panel.resume_label.isHidden()
+    assert "5 frame(s) already on disk" in note and "rendering 5 (5..9)" in note
+
+
+def test_resume_off_says_everything_will_be_rendered_again(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, cycles_project_loader, blend_file: Path, tmp_path: Path
+) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = _ready_window(
+        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    window.project_panel.resume_check.setChecked(False)
+    window.refresh_resume_preview()
+    assert "Resume off" in window.project_panel.resume_label.text()
+
+
+def test_resume_warns_when_there_is_nothing_left_to_render(
+    qapp, settings_path: Path, fake_blender: Path, caps_loader, cycles_project_loader, blend_file: Path, tmp_path: Path
+) -> None:
+    store = SettingsStore(settings_path)
+    store.save(AppSettings(blender_path=str(fake_blender), default_output_dir=str(tmp_path / "out")))
+    window = _ready_window(
+        qapp, store, caps_loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151, ram_mb=32189)
+    )
+    panel = window.project_panel
+    panel.mode_combo.setCurrentIndex(panel.mode_combo.findData(FrameRangeMode.SINGLE))
+    panel.frame_spin.setValue(3)
+
+    job = panel.current_job()
+    output = Path(resolve_output_path(job, window.settings, "Scene"))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    suffix = extension_for_format(window.compose_job().file_format) or "png"
+    (output.parent / f"0003.{suffix}").write_bytes(b"x" * 2048)
+
+    window.refresh_resume_preview()
+    assert "nothing to render" in panel.resume_label.text()
+
+
+# --- денойзер зависит от версии Blender (патч 3011) ---------------------------------
+
+
+def _caps_with_denoisers(fixtures_dir: Path, denoisers: list[str], dlss: bool):
+    """Фикстура 5.0.1, доработанная под нужный набор денойзеров."""
+    data = json.loads((fixtures_dir / CAPS_FIXTURE).read_text(encoding="utf-8"))
+    cycles = data["groups"]["cycles"]["properties"]
+    cycles["denoiser"]["enum_items"] = [{"identifier": d, "name": d, "description": ""} for d in denoisers]
+    if dlss:
+        cycles["dlss_preset"] = {
+            "identifier": "dlss_preset",
+            "type": "ENUM",
+            "enum_items": [{"identifier": x, "name": x, "description": ""} for x in ("D", "E", "F")],
+        }
+    else:
+        cycles.pop("dlss_preset", None)
+
+    def loader(blender_path: str, *, cancel) -> Capabilities:
+        caps = Capabilities.model_validate(data)
+        caps.blender_path = blender_path
+        return caps
+
+    return loader
+
+
+def test_denoiser_choices_follow_the_selected_blender(
+    qapp, configured_store: SettingsStore, cycles_project_loader, blend_file: Path, fixtures_dir: Path
+) -> None:
+    """Отзыв: «если выбрать Blender 5.3, нужно предоставить в Denoise выбор параметров»."""
+    old = _caps_with_denoisers(fixtures_dir, ["OPENIMAGEDENOISE", "OPTIX"], dlss=False)
+    window = _ready_window(qapp, configured_store, old, cycles_project_loader, blend_file, _hardware(vram_mb=8151))
+    form = window.settings_form
+    assert form.row_visible("denoiser")
+    assert [form.rows["denoiser"].widget.itemText(i) for i in range(form.rows["denoiser"].widget.count())] == [
+        "OPENIMAGEDENOISE",
+        "OPTIX",
+    ]
+    assert not form.row_visible("dlss_preset")  # в 5.0.1 такого свойства нет
+
+    new = _caps_with_denoisers(fixtures_dir, ["DLSS", "OPENIMAGEDENOISE", "OPTIX"], dlss=True)
+    window53 = _ready_window(qapp, configured_store, new, cycles_project_loader, blend_file, _hardware(vram_mb=8151))
+    form53 = window53.settings_form
+    assert [form53.rows["denoiser"].widget.itemText(i) for i in range(form53.rows["denoiser"].widget.count())] == [
+        "DLSS",
+        "OPENIMAGEDENOISE",
+        "OPTIX",
+    ]
+    assert form53.row_visible("dlss_preset")
+
+
+def test_chosen_denoiser_reaches_the_job(
+    qapp, configured_store: SettingsStore, cycles_project_loader, blend_file: Path, fixtures_dir: Path
+) -> None:
+    loader = _caps_with_denoisers(fixtures_dir, ["DLSS", "OPENIMAGEDENOISE", "OPTIX"], dlss=True)
+    window = _ready_window(qapp, configured_store, loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151))
+    form = window.settings_form
+    form.rows["denoiser"].set_mode(MODE_CUSTOM)
+    form.rows["denoiser"].set_value("DLSS")
+    form.rows["dlss_preset"].set_mode(MODE_CUSTOM)
+    form.rows["dlss_preset"].set_value("E")
+
+    job = window.compose_job()
+    assert job is not None
+    assert job.overrides["cycles.denoiser"] == "DLSS"
+    assert job.overrides["cycles.dlss_preset"] == "E"
