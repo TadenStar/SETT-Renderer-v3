@@ -19,6 +19,9 @@ settings.json
 tmp/
 
 # Blender
+# Сцена для замеров собирается генератором tools/make_bench_scene.py,
+# сам .blend в репозитории не нужен.
+bench/
 *.blend1
 *.blend2
 
