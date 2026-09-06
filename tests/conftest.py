@@ -59,6 +59,28 @@ def _stub_hardware_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_window_mod, "detect_hardware", stub)
 
 
+@pytest.fixture(autouse=True)
+def _close_leftover_windows():
+    """Закрывает окна, созданные тестом, и отдаёт Qt их удалить.
+
+    Тесты создают MainWindow и диалоги десятками и никогда их не закрывают.
+    Виджеты копились на весь прогон вместе со своими QProcess и таймерами,
+    и в случайном порядке набор начал ронять тест сборки видео: в
+    фиксированном порядке он проходил, в случайном — нет. Причина не в
+    нагрузке машины, а в отсутствии изоляции.
+    """
+    yield
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in list(app.topLevelWidgets()):
+        widget.close()
+        widget.deleteLater()
+    app.processEvents()
+
+
 @pytest.fixture
 def settings_path(tmp_path: Path) -> Path:
     return tmp_path / "settings.json"
