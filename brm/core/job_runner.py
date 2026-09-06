@@ -71,6 +71,8 @@ class JobRunner(QObject):
         self.skipped_existing: list[int] = []
         self.extra_overrides: dict[str, Any] = {}
         self.retry_notes: list[str] = []
+        # Заполняет главное окно: раннер сам железо не пробует.
+        self.hardware_summary: str = ""
         self.oom_attempt = 0
         self.crash_attempt = 0
         self.started_at: datetime | None = None
@@ -314,6 +316,13 @@ class JobRunner(QObject):
                 "skipped_existing": self.skipped_existing,
                 "log_files": [plan.log_path.name for plan in self.plans],
                 "output_path": first.output_path,
+                # Что именно применили и на чём считали: без этого время кадра
+                # не с чем сопоставить, когда дойдём до автонастройки.
+                "overrides": dict(self.job.overrides),
+                "cycles_device": first.cycles_device,
+                "compute_mode": self.job.compute_mode,
+                "camera_cull": self.job.camera_cull,
+                "hardware": self.hardware_summary,
                 # Для истории (M7): started_at не совпадает с finished_at при chunking/resume.
                 "started_at": self.started_at.isoformat(timespec="seconds"),
                 "finished_at": datetime.now().isoformat(timespec="seconds"),

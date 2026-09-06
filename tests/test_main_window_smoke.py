@@ -1752,3 +1752,70 @@ def test_resume_warns_when_there_is_nothing_left_to_render(
 
     window.refresh_resume_preview()
     assert "nothing to render" in panel.resume_label.text()
+
+
+# --- денойзер зависит от версии Blender (патч 3011) ---------------------------------
+
+
+def _caps_with_denoisers(fixtures_dir: Path, denoisers: list[str], dlss: bool):
+    """Фикстура 5.0.1, доработанная под нужный набор денойзеров."""
+    data = json.loads((fixtures_dir / CAPS_FIXTURE).read_text(encoding="utf-8"))
+    cycles = data["groups"]["cycles"]["properties"]
+    cycles["denoiser"]["enum_items"] = [{"identifier": d, "name": d, "description": ""} for d in denoisers]
+    if dlss:
+        cycles["dlss_preset"] = {
+            "identifier": "dlss_preset",
+            "type": "ENUM",
+            "enum_items": [{"identifier": x, "name": x, "description": ""} for x in ("D", "E", "F")],
+        }
+    else:
+        cycles.pop("dlss_preset", None)
+
+    def loader(blender_path: str, *, cancel) -> Capabilities:
+        caps = Capabilities.model_validate(data)
+        caps.blender_path = blender_path
+        return caps
+
+    return loader
+
+
+def test_denoiser_choices_follow_the_selected_blender(
+    qapp, configured_store: SettingsStore, cycles_project_loader, blend_file: Path, fixtures_dir: Path
+) -> None:
+    """Отзыв: «если выбрать Blender 5.3, нужно предоставить в Denoise выбор параметров»."""
+    old = _caps_with_denoisers(fixtures_dir, ["OPENIMAGEDENOISE", "OPTIX"], dlss=False)
+    window = _ready_window(qapp, configured_store, old, cycles_project_loader, blend_file, _hardware(vram_mb=8151))
+    form = window.settings_form
+    assert form.row_visible("denoiser")
+    assert [form.rows["denoiser"].widget.itemText(i) for i in range(form.rows["denoiser"].widget.count())] == [
+        "OPENIMAGEDENOISE",
+        "OPTIX",
+    ]
+    assert not form.row_visible("dlss_preset")  # в 5.0.1 такого свойства нет
+
+    new = _caps_with_denoisers(fixtures_dir, ["DLSS", "OPENIMAGEDENOISE", "OPTIX"], dlss=True)
+    window53 = _ready_window(qapp, configured_store, new, cycles_project_loader, blend_file, _hardware(vram_mb=8151))
+    form53 = window53.settings_form
+    assert [form53.rows["denoiser"].widget.itemText(i) for i in range(form53.rows["denoiser"].widget.count())] == [
+        "DLSS",
+        "OPENIMAGEDENOISE",
+        "OPTIX",
+    ]
+    assert form53.row_visible("dlss_preset")
+
+
+def test_chosen_denoiser_reaches_the_job(
+    qapp, configured_store: SettingsStore, cycles_project_loader, blend_file: Path, fixtures_dir: Path
+) -> None:
+    loader = _caps_with_denoisers(fixtures_dir, ["DLSS", "OPENIMAGEDENOISE", "OPTIX"], dlss=True)
+    window = _ready_window(qapp, configured_store, loader, cycles_project_loader, blend_file, _hardware(vram_mb=8151))
+    form = window.settings_form
+    form.rows["denoiser"].set_mode(MODE_CUSTOM)
+    form.rows["denoiser"].set_value("DLSS")
+    form.rows["dlss_preset"].set_mode(MODE_CUSTOM)
+    form.rows["dlss_preset"].set_value("E")
+
+    job = window.compose_job()
+    assert job is not None
+    assert job.overrides["cycles.denoiser"] == "DLSS"
+    assert job.overrides["cycles.dlss_preset"] == "E"

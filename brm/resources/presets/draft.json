@@ -42,6 +42,7 @@
   "cycles.texture_limit_render": "1024",
   "cycles.denoiser": {
    "prefer": [
+    "DLSS",
     "OPTIX",
     "OPENIMAGEDENOISE"
    ]
@@ -52,7 +53,8 @@
   "cycles.denoising_use_gpu": true,
   "cycles.use_fast_gi": true,
   "cycles.fast_gi_method": "ADD",
-  "cycles.ao_bounces_render": 2
+  "cycles.ao_bounces_render": 2,
+  "cycles.dlss_preset": "D"
  },
  "eevee": {
   "eevee.taa_render_samples": 16,

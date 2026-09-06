@@ -22,6 +22,9 @@ RE_EEVEE_SAMPLE = re.compile(r"\bRendering\s+(?P<cur>\d+)\s*/\s*(?P<total>\d+)\s
 RE_MEM = re.compile(r"\bMem:\s*(?P<val>[\d.]+)\s*(?P<unit>[KMG])")
 RE_PEAK = re.compile(r"\bPeak(?:\s*Mem)?[: ]+\s*(?P<val>[\d.]+)\s*(?P<unit>[KMG])")
 RE_REMAINING = re.compile(r"\bRemaining:\s*(?P<t>[\d:.]+)")
+# Компиляция ядер: первый рендер сцены со свежими материалами занимает минуты,
+# и без этой строки приложение выглядит зависшим на первом кадре.
+RE_KERNELS = re.compile(r"Loading [\w ]*kernels", re.IGNORECASE)
 RE_SAVED = re.compile(r"^Saved:\s*'(?P<path>.+)'\s*$")
 RE_TIME = re.compile(r"^Time:\s*(?P<t>[\d:.]+)(?:\s*\(Saving:\s*(?P<saving>[\d:.]+)\))?")
 RE_FRAME_START = re.compile(r"^Rendering frame\s+(?P<frame>-?\d+)")
@@ -62,6 +65,9 @@ class LogEvent:
     peak_mb: float | None = None
     remaining_s: float | None = None
     saved_path: str | None = None
+    # Blender компилирует ядра: первый рендер сцены со свежими материалами
+    # занимает минуты, и без этого признака приложение выглядит зависшим.
+    compiling_kernels: bool = False
     frame_time_s: float | None = None
     saving_time_s: float | None = None
     first_frame: int | None = None
@@ -128,6 +134,10 @@ def parse_line(line: str) -> LogEvent:
     if is_error_line(raw):
         event.kind = KIND_ERROR
         return event
+
+    # Компиляция ядер приходит и отдельной строкой, и внутри строки Fra:,
+    # поэтому это флаг, а не отдельный вид события.
+    event.compiling_kernels = RE_KERNELS.search(body) is not None
 
     fra = RE_FRA.match(body)
     if fra:

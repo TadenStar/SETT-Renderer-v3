@@ -198,3 +198,21 @@ def test_frames_are_counted_when_output_is_glued_to_the_log() -> None:
     # Время кадра тоже доезжает: без Saved оно раньше отбрасывалось.
     assert [round(t, 2) for _, t in progress.frame_times()] == [19.28, 15.95]
     assert progress.eta_seconds() is not None
+
+
+def test_kernel_compilation_is_remembered_until_samples_start() -> None:
+    """Пока идут ядра, ни сэмплов, ни кадров нет — приложение должно объяснять паузу."""
+    tracker = RenderTracker([1, 2])
+    tracker.feed("00:00.100  render           | Loading render kernels (may take a few minutes the first time)")
+    assert tracker.progress.compiling_kernels is True
+
+    tracker.feed("04:31.000  render           | Fra: 1 | Mem: 100M | Sample 1/128")
+    assert tracker.progress.compiling_kernels is False
+
+
+def test_kernel_compilation_clears_on_a_saved_frame() -> None:
+    """У EEVEE строк с сэмплами может не быть — тогда признак снимает сохранение кадра."""
+    tracker = RenderTracker([1])
+    tracker.feed("00:00.100  render           | Loading render kernels (may take a few minutes the first time)")
+    tracker.feed(r"00:20.000  render           | Saved: 'C:\out\0001.png'")
+    assert tracker.progress.compiling_kernels is False

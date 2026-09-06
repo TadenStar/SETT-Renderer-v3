@@ -851,6 +851,9 @@ class MainWindow(QMainWindow):
 
     def _launch(self, job: RenderJob, project: ProjectInfo) -> bool:
         assert self.capabilities is not None
+        # Железо попадает в историю вместе с настройками: рекомендации потом
+        # должны быть «под эту машину», а не вообще.
+        self.runner.hardware_summary = self.hardware.summary()
         try:
             self.runner.start(job, self.capabilities, self.settings, project, tmp_dir=tmp_dir())
         except (ValueError, RuntimeError) as exc:
