@@ -56,6 +56,8 @@ class ProjectPanel(QGroupBox):
     file_requested = Signal(str)
     safety_requested = Signal()
     analysis_requested = Signal()
+    # Изменилось что-то, от чего зависит список кадров или папка вывода.
+    job_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Project", parent)
@@ -135,6 +137,11 @@ class ProjectPanel(QGroupBox):
 
         self.frames_label = QLabel("—", self)
         self.frames_label.setWordWrap(True)
+        # Сколько кадров уже лежит на диске и какой диапазон реально уйдёт
+        # в Blender. Без этой строки команда с -s 122 выглядела как ошибка.
+        self.resume_label = QLabel("", self)
+        self.resume_label.setWordWrap(True)
+        self.resume_label.hide()
 
         for widget in (self.start_spin, self.end_spin, self.frame_spin, self.step_spin):
             widget.valueChanged.connect(self._update_frames_summary)
@@ -143,6 +150,7 @@ class ProjectPanel(QGroupBox):
         # --- вывод --------------------------------------------------------------
         self.output_edit = QLineEdit(DEFAULT_OUTPUT_TEMPLATE, self)
         self.output_edit.textChanged.connect(self._update_output_preview)
+        self.output_edit.textChanged.connect(self.job_changed)
         output_browse = QPushButton("Folder…", self)
         output_browse.clicked.connect(self._browse_output)
         output_row = QHBoxLayout()
@@ -172,6 +180,11 @@ class ProjectPanel(QGroupBox):
         self.analyze_button.setToolTip("Count objects, triangles and instances in this scene")
         self.analyze_button.clicked.connect(self.analysis_requested)
         self.analyze_button.setEnabled(False)
+
+        # Подключаем здесь: виджеты созданы выше, а сигнал общий для всего,
+        # от чего зависит список кадров.
+        self.resume_check.toggled.connect(self.job_changed)
+        self.min_kb_spin.valueChanged.connect(self.job_changed)
 
         self.safety_button = QPushButton("Safety…", self)
         self.safety_button.setToolTip("Skipping finished frames, minimum frame size and chunk size")
@@ -204,6 +217,7 @@ class ProjectPanel(QGroupBox):
         form.addRow(self.view_layer_label, self.view_layer_combo)
         form.addRow("Frames:", range_row)
         form.addRow("", self.frames_label)
+        form.addRow("", self.resume_label)
         form.addRow("Output:", output_row)
         form.addRow("", self.output_preview)
         self.form.setEnabled(False)
@@ -369,6 +383,12 @@ class ProjectPanel(QGroupBox):
         self.step_spin.setEnabled(mode in (FrameRangeMode.FROM_FILE, FrameRangeMode.MANUAL))
         self._update_frames_summary()
 
+    def set_resume_note(self, text: str, role: str = "muted") -> None:
+        """Строка про пропуск готовых кадров; пустой текст прячет её."""
+        self.resume_label.setText(text)
+        set_role(self.resume_label, role)
+        self.resume_label.setVisible(bool(text))
+
     @staticmethod
     def _show_row(label: QLabel, widget: QWidget, visible: bool) -> None:
         """Показывает или прячет строку формы целиком, вместе с подписью."""
@@ -398,6 +418,7 @@ class ProjectPanel(QGroupBox):
         if scene is not None and camera and camera != "—":
             text += f" · camera {camera}"
         self.frames_label.setText(text)
+        self.job_changed.emit()
         set_role(self.frames_label, "")
 
     def _update_output_preview(self) -> None:

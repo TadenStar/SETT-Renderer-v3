@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import glob
 import os
 import re
 from collections.abc import Iterable
@@ -96,27 +95,47 @@ def scan_output(
     *,
     extensions: Iterable[str] | None = None,
 ) -> OutputScan:
-    """Ищет файл каждого кадра. Из нескольких (jpg от Draft и exr от Final) берёт самый большой."""
+    """Ищет файл каждого кадра. Из нескольких (jpg от Draft и exr от Final) берёт самый большой.
+
+    Папка читается один раз, а не поиском на каждый кадр: на анимации в 1441 кадр
+    это была тысяча с лишним обходов каталога, и предпросмотр resume в интерфейсе
+    из-за них заметно тормозил.
+    """
     template = parse_output_template(output_path)
     scan = OutputScan(template)
     allowed = {e.lower().lstrip(".") for e in extensions} if extensions else None
-    directory = template.directory
+    by_stem = _files_by_stem(template.directory, allowed)
     for frame in frames:
         info = FrameFile(frame=frame)
-        if directory.is_dir():
-            pattern = os.path.join(glob.escape(str(directory)), glob.escape(template.file_stem(frame)) + ".*")
-            best: tuple[int, Path] | None = None
-            for candidate in glob.glob(pattern):
-                path = Path(candidate)
-                if allowed is not None and path.suffix.lower().lstrip(".") not in allowed:
-                    continue
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    continue
-                if best is None or size > best[0]:
-                    best = (size, path)
-            if best is not None:
-                info.size, info.path = best
+        best = by_stem.get(template.file_stem(frame))
+        if best is not None:
+            info.size, info.path = best
         scan.files[frame] = info
     return scan
+
+
+def _files_by_stem(directory: Path, allowed: set[str] | None) -> dict[str, tuple[int, Path]]:
+    """{имя без расширения: (размер, путь)} за один обход каталога.
+
+    Из нескольких файлов с одинаковым именем остаётся самый большой: Draft мог
+    положить рядом лёгкий jpg, а Final — полноценный exr.
+    """
+    result: dict[str, tuple[int, Path]] = {}
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return result
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        path = Path(entry.path)
+        if allowed is not None and path.suffix.lower().lstrip(".") not in allowed:
+            continue
+        try:
+            size = entry.stat().st_size
+        except OSError:
+            continue
+        current = result.get(path.stem)
+        if current is None or size > current[0]:
+            result[path.stem] = (size, path)
+    return result
