@@ -451,7 +451,9 @@ def test_queue_restores_interrupted_items(qapp, settings_path: Path, fake_blende
 
 def test_author_credit_is_shown(qapp, settings_path: Path) -> None:
     window = MainWindow(SettingsStore(settings_path))
-    assert window.credit_label.text() == "Made by Pavel Postnikov · Build 3001"
+    from brm import __build__
+
+    assert window.credit_label.text() == f"Made by Pavel Postnikov · Build {__build__}"
 
 
 def test_settings_dialog_ok_follows_validation(qapp, fake_blender: Path) -> None:
