@@ -43,7 +43,8 @@ from brm.core.preset_resolver import FILE_FORMAT_PATH, ResolvedPreset
 from brm.core.presets import MANUAL_PRESET_NAME, Preset
 from brm.ui.expert_form import ExpertForm
 from brm.ui.field_modes import MODE_CUSTOM, MODE_PRESET, MODE_SKIP
-from brm.ui.theme import set_role
+from brm.ui.icons import glyph_icon
+from brm.ui.theme import current_theme, set_role, tokens_for
 
 _MODES = [("Preset", MODE_PRESET), ("Custom", MODE_CUSTOM), ("Don't touch", MODE_SKIP)]
 DEFAULT_FORMATS = ["PNG", "JPEG", "OPEN_EXR", "OPEN_EXR_MULTILAYER", "TIFF", "BMP"]
@@ -102,6 +103,20 @@ PARAMS: tuple[ParamSpec, ...] = (
     ParamSpec("tiles", "Tile rendering", "cycles.use_auto_tile", None, "bool"),
     ParamSpec("format", "File format", FILE_FORMAT_PATH, FILE_FORMAT_PATH, "enum", choices=DEFAULT_FORMATS),
 )
+
+
+# Что попадает в строку-сводку под списком пресетов и в каком виде.
+SUMMARY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("samples", "{} samples"),
+    ("threshold", "noise {}"),
+    ("time_limit", "limit {} s"),
+    ("denoise", ""),
+    ("denoiser", "{}"),
+    ("dlss_preset", "DLSS {}"),
+    ("resolution", "{}%"),
+    ("format", "{}"),
+)
+_SPEC_BY_KEY = {spec.key: spec for spec in PARAMS}
 
 
 class ParamRow(QWidget):
@@ -248,6 +263,7 @@ class SettingsForm(QGroupBox):
     save_preset_requested = Signal()
     delete_preset_requested = Signal()
     expert_requested = Signal()
+    details_requested = Signal()
     compute_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -255,6 +271,7 @@ class SettingsForm(QGroupBox):
         self._presets: list[Preset] = []
         self._caps: Capabilities | None = None
         self._engine: str | None = None
+        self._resolved: ResolvedPreset | None = None
         # Значения берутся из экспертного окна, а не из списка режимов.
         self._expert_mode = False
 
@@ -305,6 +322,7 @@ class SettingsForm(QGroupBox):
         self.device_combo.currentIndexChanged.connect(
             lambda _index: self.compute_changed.emit(self.compute_mode())
         )
+        self.device_combo.currentIndexChanged.connect(self._update_summary)
         self.cull_check = QCheckBox("Camera culling", self)
         self.cull_check.setToolTip(
             "Skip objects outside the camera view. Cycles only; the .blend file is not changed"
@@ -367,18 +385,78 @@ class SettingsForm(QGroupBox):
         self.stack.addWidget(self._simple_scroll)
         self.stack.setCurrentIndex(_VIEW_INDEX[VIEW_SIMPLE])
 
+        # Подробные настройки уехали в своё окно: по отзыву с реальной задачи
+        # на главном экране нужны список пресетов и одна кнопка, остальное
+        # трогают редко. Виджеты те же — сменилось только место, где они лежат.
+        self.details_widget = QWidget()
+        details = QVBoxLayout(self.details_widget)
+        details.setContentsMargins(0, 0, 0, 0)
+        details.addWidget(self.tune_check)
+        details.addWidget(self.tuning_label)
+        details.addLayout(device_row)
+        details.addLayout(view_row)
+        details.addWidget(self.stack, 1)
+
+        # Строка-сводка: с чем поедет рендер, если нажать Render прямо сейчас.
+        # Без неё с главного экрана не видно ни денойзера, ни лимита кадра.
+        self.summary_label = QLabel("", self)
+        self.summary_label.setWordWrap(True)
+        set_role(self.summary_label, "muted")
+        self.details_button = QPushButton("Detailed Settings", self)
+        self.details_button.setObjectName("wideButton")
+        self.details_button.setToolTip("Preset values, device, and every property this Blender exposes")
+        self.details_button.clicked.connect(self.details_requested)
+
         layout = QVBoxLayout(self)
         layout.addLayout(preset_row)
         layout.addWidget(self.description_label)
         layout.addWidget(self.warning_label)
-        layout.addWidget(self.tune_check)
-        layout.addWidget(self.tuning_label)
-        layout.addLayout(device_row)
-        layout.addLayout(view_row)
-        layout.addWidget(self.stack, 1)
+        layout.addWidget(self.summary_label)
+        # Предупреждение о настройках, которых нет в этом Blender, остаётся на
+        # главном экране: пресет с DLSS на 5.0.1 иначе молча теряет половину.
+        layout.addWidget(self.skipped_label)
+        layout.addWidget(self.details_button)
+        layout.addStretch(1)
         # До пробы Blender мы не знаем, какие денойзеры есть: строки скрыты.
         self._sync_dynamic_rows()
-        layout.addWidget(self.skipped_label)
+        self.values_changed.connect(self._update_summary)
+        self.refresh_icons()
+        self._update_summary()
+
+    def refresh_icons(self) -> None:
+        """Глиф на кнопке рисуется цветом текста темы — обновляется вместе с ней."""
+        tokens = tokens_for(current_theme(None) or "dark")
+        self.details_button.setIcon(glyph_icon("cog", tokens["text"]))
+
+    def _update_summary(self) -> None:
+        """Что реально уйдёт в Blender: пресет, поверх него свои значения.
+
+        Строки в режиме «Don't touch» не применяются, поэтому в сводку не идут.
+        """
+        values = dict(self._resolved.display) if self._resolved is not None else {}
+        values.update(self.custom_values())
+        for skipped in self.untouched_paths():
+            values.pop(skipped, None)
+
+        parts = [self.device_combo.currentText()]
+        for key, template in SUMMARY_FIELDS:
+            spec = _SPEC_BY_KEY[key]
+            path = spec.path_for(self._engine)
+            value = values.get(path) if path else None
+            if value is None or value == "":
+                continue
+            if isinstance(value, dict):
+                # {"prefer": [...]} — применится первый кандидат, его и показываем.
+                candidates = value.get("prefer") or []
+                if not candidates:
+                    continue
+                value = candidates[0]
+            if isinstance(value, bool):
+                if key == "denoise" and not value:
+                    parts.append("no denoise")
+                continue
+            parts.append(template.format(value))
+        self.summary_label.setText(" · ".join(parts))
 
     # --- публичное API ---------------------------------------------------------
 
@@ -490,6 +568,7 @@ class SettingsForm(QGroupBox):
 
     def set_engine(self, engine: str | None) -> None:
         self._engine = engine
+        self._update_summary()
         for row in self.rows.values():
             row.set_engine(engine)
         self.expert_form.set_engine(engine)
@@ -499,6 +578,8 @@ class SettingsForm(QGroupBox):
 
     def show_resolved(self, resolved: ResolvedPreset | None) -> None:
         """Значения пресета в строках; пропущенные настройки — одной строкой с тултипом."""
+        self._resolved = resolved
+        self._update_summary()
         for row in self.rows.values():
             path = row.path()
             row.show_preset_value(resolved.value(path) if (resolved and path) else None)

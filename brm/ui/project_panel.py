@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,7 +30,9 @@ from PySide6.QtWidgets import (
 from brm.core.frame_range import FrameRange, FrameRangeMode, describe_frames, resolve_frames
 from brm.core.models import DEFAULT_OUTPUT_TEMPLATE, RenderJob, expand_output_template
 from brm.core.project_probe import ProjectInfo, SceneInfo, file_version_str
-from brm.ui.theme import set_role
+from brm.ui.elided_label import ElidedLabel
+from brm.ui.icons import glyph_icon
+from brm.ui.theme import current_theme, set_role, tokens_for
 
 _FRAME_MODES = [
     (FrameRangeMode.FROM_FILE, "From file"),
@@ -54,7 +56,6 @@ def blend_paths_from_mime(mime) -> list[str]:
 
 class ProjectPanel(QGroupBox):
     file_requested = Signal(str)
-    safety_requested = Signal()
     analysis_requested = Signal()
     # Изменилось что-то, от чего зависит список кадров или папка вывода.
     job_changed = Signal()
@@ -69,6 +70,9 @@ class ProjectPanel(QGroupBox):
         # --- файл -------------------------------------------------------------
         self.path_edit = QLineEdit(self)
         self.path_edit.setPlaceholderText("Drop a .blend file here or browse…")
+        self._file_icon_action = self.path_edit.addAction(
+            QIcon(), QLineEdit.ActionPosition.LeadingPosition
+        )
         self.path_edit.returnPressed.connect(self._request_typed_path)
         browse = QPushButton("Browse…", self)
         browse.clicked.connect(self.browse)
@@ -149,6 +153,9 @@ class ProjectPanel(QGroupBox):
 
         # --- вывод --------------------------------------------------------------
         self.output_edit = QLineEdit(DEFAULT_OUTPUT_TEMPLATE, self)
+        self._output_icon_action = self.output_edit.addAction(
+            QIcon(), QLineEdit.ActionPosition.LeadingPosition
+        )
         self.output_edit.textChanged.connect(self._update_output_preview)
         self.output_edit.textChanged.connect(self.job_changed)
         output_browse = QPushButton("Folder…", self)
@@ -156,8 +163,7 @@ class ProjectPanel(QGroupBox):
         output_row = QHBoxLayout()
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(output_browse)
-        self.output_preview = QLabel("—", self)
-        self.output_preview.setWordWrap(True)
+        self.output_preview = ElidedLabel("—", self)
         set_role(self.output_preview, "muted")
 
         # --- защита от падений (M5) --------------------------------------------------
@@ -185,10 +191,6 @@ class ProjectPanel(QGroupBox):
         # от чего зависит список кадров.
         self.resume_check.toggled.connect(self.job_changed)
         self.min_kb_spin.valueChanged.connect(self.job_changed)
-
-        self.safety_button = QPushButton("Safety…", self)
-        self.safety_button.setToolTip("Skipping finished frames, minimum frame size and chunk size")
-        self.safety_button.clicked.connect(self.safety_requested)
 
         # Виджеты живут здесь (их читает current_job), а показываются в отдельном
         # окне: в работе эти три поля не трогают, а место на главном экране занимали.
@@ -223,7 +225,6 @@ class ProjectPanel(QGroupBox):
         self.form.setEnabled(False)
 
         file_row.addWidget(self.analyze_button)
-        file_row.addWidget(self.safety_button)
 
         layout = QVBoxLayout(self)
         layout.addLayout(file_row)
@@ -232,7 +233,14 @@ class ProjectPanel(QGroupBox):
         layout.addWidget(self.form)
         layout.addStretch(1)
 
+        self.refresh_icons()
         self._on_mode_changed(0)
+
+    def refresh_icons(self) -> None:
+        """Глифы в полях рисуются цветом темы — обновляются вместе с ней."""
+        tokens = tokens_for(current_theme(None) or "dark")
+        self._file_icon_action.setIcon(glyph_icon("file", tokens["muted"]))
+        self._output_icon_action.setIcon(glyph_icon("folder", tokens["muted"]))
 
     # --- публичное API ---------------------------------------------------------
 

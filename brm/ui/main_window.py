@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer
@@ -15,7 +16,6 @@ from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKe
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
     QInputDialog,
@@ -79,12 +79,15 @@ from brm.core.storage import AppSettings, SettingsStore, cache_dir, tmp_dir, wit
 from brm.core.system_actions import SHUTDOWN_DELAY_S, cancel_shutdown, schedule_shutdown
 from brm.core.video_runner import VIDEO_SUCCESS, VideoProcess, describe_result
 from brm.ui.analysis_dialog import AnalysisDialog
+from brm.ui.analytics_panel import AnalyticsPanel
 from brm.ui.banner import WarningBanner
+from brm.ui.control_panel import ControlPanel
+from brm.ui.details_window import DetailsWindow
 from brm.ui.expert_window import ExpertWindow
 from brm.ui.history_dialog import HistoryDialog
-from brm.ui.log_view import LogView
+from brm.ui.log_card import LogCard
+from brm.ui.log_window import LogWindow
 from brm.ui.notifications import Notifier
-from brm.ui.progress_panel import ProgressPanel
 from brm.ui.project_panel import ProjectPanel, blend_paths_from_mime
 from brm.ui.queue_dialog import QueueDialog
 from brm.ui.queue_view import QueueView
@@ -93,7 +96,7 @@ from brm.ui.preview_window import PreviewWindow
 from brm.ui.safety_dialog import SafetyDialog
 from brm.ui.settings_dialog import SettingsDialog
 from brm.ui.settings_form import SettingsForm
-from brm.ui.theme import apply_theme
+from brm.ui.theme import apply_theme, set_role
 from brm.ui.video_dialog import VideoDialog
 from brm.ui.video_panel import VideoPanel
 from brm.ui.workers import FunctionTask
@@ -167,6 +170,8 @@ class MainWindow(QMainWindow):
         self._queue_dialog: QueueDialog | None = None
         self._safety_dialog: SafetyDialog | None = None
         self._expert_window: ExpertWindow | None = None
+        self._details_window: DetailsWindow | None = None
+        self._log_window: LogWindow | None = None
         self._video_dialog: VideoDialog | None = None
         self._analysis_dialog: AnalysisDialog | None = None
         self._analysis_task: FunctionTask | None = None
@@ -199,7 +204,7 @@ class MainWindow(QMainWindow):
         self.notifier.enabled = self.settings.notifications
         self._shutdown_pending = False
 
-        self.setWindowTitle(f"BRM — Blender Render Manager {__version__}")
+        self.set_window_title()
         self.resize(1200, 760)
         self.setAcceptDrops(True)
 
@@ -214,6 +219,7 @@ class MainWindow(QMainWindow):
         self.settings_form.save_preset_requested.connect(self.save_current_as_preset)
         self.settings_form.delete_preset_requested.connect(self.delete_selected_preset)
         self.settings_form.expert_requested.connect(self.show_expert_settings)
+        self.settings_form.details_requested.connect(self.show_details)
         self.settings_form.values_changed.connect(self._on_values_changed)
         self.settings_form.set_compute_mode(self.settings.compute_mode)
         self.settings_form.compute_changed.connect(self._on_compute_mode_changed)
@@ -271,6 +277,10 @@ class MainWindow(QMainWindow):
         video_action.triggered.connect(self.show_video)
         view_menu.addAction(video_action)
 
+        safety_action = QAction("&Safety…", self)
+        safety_action.triggered.connect(self.show_safety)
+        view_menu.addAction(safety_action)
+
         help_menu = self.menuBar().addMenu("&Help")
         about_action = QAction("&About BRM", self)
         about_action.triggered.connect(self.show_about)
@@ -293,39 +303,23 @@ class MainWindow(QMainWindow):
         self.shutdown_banner.hide()
         root.addWidget(self.shutdown_banner)
 
-        top = QWidget(central)
-        top_layout = QHBoxLayout(top)
-        top_layout.setContentsMargins(12, 8, 12, 8)
-        self.blender_label = QLabel(top)
-        top_layout.addWidget(self.blender_label, 1)
-        self.render_button = QPushButton("Render", top)
-        self.render_button.setObjectName("primaryButton")  # единственная акцентная кнопка
-        self.render_button.setMinimumWidth(140)
-        self.render_button.clicked.connect(self.start_render)
-        top_layout.addWidget(self.render_button, 0)
-        self.pause_button = QPushButton("Pause", top)
-        self.pause_button.setMinimumWidth(100)
-        self.pause_button.setEnabled(False)
-        self.pause_button.setToolTip("Pause after the current frame; Resume renders the remaining frames")
-        self.pause_button.clicked.connect(self.pause_or_resume)
-        top_layout.addWidget(self.pause_button, 0)
-        self.stop_button = QPushButton("Stop", top)
-        self.stop_button.setObjectName("dangerButton")
-        self.stop_button.setMinimumWidth(100)
-        self.stop_button.setEnabled(False)
-        self.stop_button.setToolTip("Stop after terminate; kill if Blender ignores it for 5 s. Stops the queue too")
-        self.stop_button.clicked.connect(self.stop_render)
-        top_layout.addWidget(self.stop_button, 0)
-        root.addWidget(top)
-
         self.project_panel = ProjectPanel()
         self.project_panel.file_requested.connect(self.open_project)
-        self.project_panel.safety_requested.connect(self.show_safety)
         self.project_panel.analysis_requested.connect(self.analyze_scene)
         self.project_panel.job_changed.connect(self._on_job_inputs_changed)
         self.settings_form = SettingsForm()
-        self.progress_panel = ProgressPanel()
-        self.log_view = LogView()
+        self.analytics_panel = AnalyticsPanel()
+        self.control_panel = ControlPanel()
+        # Кнопки управления живут в нижней карточке, но зовут их отовсюду —
+        # держим короткие имена, чтобы остальной код не знал про раскладку.
+        self.render_button = self.control_panel.render_button
+        self.pause_button = self.control_panel.pause_button
+        self.stop_button = self.control_panel.stop_button
+        self.render_button.clicked.connect(self.start_render)
+        self.pause_button.clicked.connect(self.pause_or_resume)
+        self.stop_button.clicked.connect(self.stop_render)
+        self.log_view = LogCard()
+        self.log_view.full_log_requested.connect(self.show_full_log)
         self.queue_view = QueueView()
         self.queue_view.add_requested.connect(self.add_current_to_queue)
         self.queue_view.run_requested.connect(self.run_queue)
@@ -335,26 +329,38 @@ class MainWindow(QMainWindow):
         self.video_panel.build_requested.connect(self.build_video)
         self.video_panel.stop_requested.connect(self.stop_video)
 
-        left = QSplitter(Qt.Orientation.Vertical)
-        left.addWidget(self.project_panel)
-        left.addWidget(self.settings_form)
-        # Настройкам достаётся всё, что остаётся: раньше их зажимали панель видео
-        # и очередь, и строки сминались до нечитаемого.
-        left.setStretchFactor(1, 1)
-        left.setSizes([260, 500])
-        right = QSplitter(Qt.Orientation.Vertical)
-        right.addWidget(self.progress_panel)
-        right.addWidget(self.log_view)
-        right.setSizes([260, 480])
+        # Колонки больше не делятся сплиттером по вертикали: карточек стало по
+        # две-три на сторону, и каждая просит ровно столько места, сколько ей надо.
+        left = QWidget(central)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(12, 12, 6, 12)
+        left_layout.setSpacing(12)
+        left_layout.addWidget(self.project_panel)
+        left_layout.addWidget(self.settings_form)
+        left_layout.addStretch(1)
+
+        right = QWidget(central)
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(6, 12, 12, 12)
+        right_layout.setSpacing(12)
+        right_layout.addWidget(self.analytics_panel, 1)
+        right_layout.addWidget(self.log_view)
+        right_layout.addWidget(self.control_panel)
+
         main_split = QSplitter(Qt.Orientation.Horizontal)
         main_split.addWidget(left)
         main_split.addWidget(right)
-        main_split.setSizes([560, 640])
+        main_split.setStretchFactor(1, 1)
+        main_split.setSizes([540, 660])
         root.addWidget(main_split, 1)
 
         self.setCentralWidget(central)
 
-        # Статус-бар: слева прогресс фоновой задачи с Cancel, справа подпись автора.
+        # Статус-бар: слева версия Blender и устройство, затем прогресс фоновой
+        # задачи с Cancel, справа год и подпись автора.
+        self.blender_label = QLabel(self)
+        set_role(self.blender_label, "muted")
+        self.statusBar().addWidget(self.blender_label)
         self.task_label = QLabel(self)
         self.task_label.hide()
         self.cancel_button = QPushButton("Cancel", self)
@@ -362,8 +368,17 @@ class MainWindow(QMainWindow):
         self.cancel_button.hide()
         self.statusBar().addWidget(self.task_label, 1)
         self.statusBar().addWidget(self.cancel_button)
-        self.credit_label = QLabel(CREDIT_TEXT, self)
+        self.credit_label = QLabel(f"© {date.today().year} · {CREDIT_TEXT}", self)
         self.statusBar().addPermanentWidget(self.credit_label)
+
+    def set_window_title(self, project: str = "") -> None:
+        """Заголовок окна: короткое имя и, если проект открыт, его файл.
+
+        Оболочка Windows дописывает к заголовку имя приложения, поэтому длинное
+        «BRM — Blender Render Manager» в самом заголовке читалось дважды.
+        """
+        name = f"BRM {__version__}"
+        self.setWindowTitle(f"{project} — {name}" if project else name)
 
     # --- состояние Blender ---------------------------------------------------
 
@@ -628,6 +643,22 @@ class MainWindow(QMainWindow):
 
         self.settings_form.set_display_mode(VIEW_SIMPLE)
 
+    def show_details(self) -> None:
+        """Подробные настройки в своём окне: на главном экране остались пресеты."""
+        if self._details_window is None:
+            self._details_window = DetailsWindow(self.settings_form.details_widget, self)
+        self._details_window.show()
+        self._details_window.raise_()
+        self._details_window.activateWindow()
+
+    def show_full_log(self) -> None:
+        """Полный лог немодально: во время рендера по нему следят за Blender."""
+        if self._log_window is None:
+            self._log_window = LogWindow(self.log_view.view, self)
+        self._log_window.show()
+        self._log_window.raise_()
+        self._log_window.activateWindow()
+
     def show_video(self) -> None:
         if self._video_dialog is None:
             self._video_dialog = VideoDialog(self.video_panel, self)
@@ -796,6 +827,7 @@ class MainWindow(QMainWindow):
         self._end_task()
         self.project = info
         self.project_panel.set_project(info, project_warnings(info))
+        self.set_window_title(Path(info.file_path).stem)
         self.settings = with_recent_project(self.settings, task.tag)
         self._store.save(self.settings)
         self.project_panel.set_recent(self.settings.recent_projects)
@@ -865,7 +897,8 @@ class MainWindow(QMainWindow):
         total = self.runner.frames_expected()
         self.log_view.clear()
         self.log_view.set_status(f"Rendering {total} frame(s)…", "muted")
-        self.progress_panel.set_running(total)
+        self.control_panel.set_running(total)
+        self.analytics_panel.set_running()
         self._render_started_at = time.monotonic()
         self.render_button.setEnabled(False)
         self.pause_button.setText("Pause")
@@ -911,7 +944,7 @@ class MainWindow(QMainWindow):
             self.runner.pause()
             self.pause_button.setEnabled(False)
             self.log_view.set_status("Pausing after the current frame…", "warning")
-            self.progress_panel.status_label.setText("Pausing after the current frame…")
+            self.control_panel.set_status("Pausing after the current frame…")
         elif self.runner.is_paused():
             self.runner.resume()
             self.render_button.setEnabled(False)
@@ -938,7 +971,9 @@ class MainWindow(QMainWindow):
         if self.runner.tracker is None:
             return
         elapsed = time.monotonic() - self._render_started_at
-        self.progress_panel.update_progress(self.runner.tracker.progress, elapsed, note=self._chunk_note())
+        progress = self.runner.tracker.progress
+        self.control_panel.update_progress(progress, elapsed, note=self._chunk_note())
+        self.analytics_panel.update_progress(progress, elapsed)
 
     def _on_render_finished(self, status: str) -> None:
         self._elapsed_timer.stop()
@@ -963,7 +998,7 @@ class MainWindow(QMainWindow):
             text += f" · retried with {runner.retry_notes[-1]}"
         self.log_view.set_status(text, role)
         self._refresh_progress()
-        self.progress_panel.set_finished(text, role, hint)
+        self.control_panel.set_finished(text, role, hint)
         if runner.plans:
             self.log_view.append_line(f"[BRM] finished: status={status} · {runner.message} · stats={runner.plans[0].stats_path}")
             if status != RUN_PAUSED:
@@ -1098,7 +1133,7 @@ class MainWindow(QMainWindow):
         """Прошлые прогоны под линией текущего рендера в панели прогресса."""
         history = self._history_points()
         series = build_series(None, history, reference_id=self.settings.reference_render_id)
-        self.progress_panel.set_history_series(series)
+        self.analytics_panel.set_history_series(series)
 
     def _on_history_row_selected(self, stats_path: str) -> None:
         if self._history_dialog is None:
@@ -1303,7 +1338,7 @@ class MainWindow(QMainWindow):
         self._save_queue()
         if not self._launch(item.job, item.project):
             item.status = "failed"
-            item.message = self.log_view.status_label.text()
+            item.message = self.log_view.status_text()
             self._save_queue()
             self._run_next_queue_item()
 
@@ -1376,6 +1411,9 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self._store.save(self.settings)
         apply_theme(QApplication.instance(), self.settings.theme)
+        # Иконки нарисованы цветом темы, поэтому переживают её смену только так.
+        for panel in (self.control_panel, self.settings_form, self.project_panel):
+            panel.refresh_icons()
         self.project_panel.set_default_output_dir(self.settings.default_output_dir or "")
         self.notifier.enabled = self.settings.notifications
         self.refresh_ffmpeg_status()

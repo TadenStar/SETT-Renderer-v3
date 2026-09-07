@@ -23,9 +23,10 @@ from brm.core.output_scan import extension_for_format
 from brm.core.render_plan import resolve_output_path
 from brm.core.render_stats import FrameStat, RenderProgress
 from brm.core.storage import AppSettings, SettingsStore
+from brm.ui.analytics_panel import AnalyticsPanel
+from brm.ui.control_panel import ControlPanel
 from brm.ui.log_view import LogView
 from brm.ui.main_window import MainWindow
-from brm.ui.progress_panel import ProgressPanel
 from brm.ui.queue_view import frames_text
 from brm.ui.settings_dialog import SettingsDialog
 from brm.ui.settings_form import MODE_CUSTOM, MODE_PRESET, MODE_SKIP, SettingsForm
@@ -151,7 +152,8 @@ def test_open_project_fills_panel_and_recent(qapp, configured_store: SettingsSto
     assert "Camera" in panel.camera_label.text()
     assert "250 frames (1..250)" in panel.frames_label.text()
     assert "Saved with Blender 5.0" in panel.summary_label.text() and "1920×1080" in panel.summary_label.text()
-    assert panel.output_preview.text().endswith("####") and panel.output_preview.text().startswith(r"D:\out")
+    preview = panel.output_preview.full_text()
+    assert preview.endswith("####") and preview.startswith(r"D:\out")
     job = panel.current_job()
     assert job.blend_path == str(blend_file) and job.scene == "Scene" and job.frame_range.mode is FrameRangeMode.FROM_FILE
     assert job.resume is True and job.min_frame_kb == 0 and job.chunk_size is None
@@ -216,20 +218,34 @@ def test_log_view_filters_and_copy(qapp) -> None:
     assert qapp.clipboard().text() == '"C:\\b.exe" -b "a.blend"' and view.status_label.text() == "Command copied"
 
 
-def test_progress_panel_states(qapp) -> None:
-    panel = ProgressPanel()
-    panel.set_running(10)
+def running_progress() -> RenderProgress:
     progress = RenderProgress(frames_expected=list(range(1, 11)), frames_done=[1, 2], current_frame=3, sample=4, samples_total=16, mem_mb=360, peak_mb=512, engine="Cycles")
     progress.frame_stats = [FrameStat(frame=1, render_time_s=0.7, wall_time_s=2.0), FrameStat(frame=2, render_time_s=0.6, wall_time_s=2.0)]
-    panel.update_progress(progress, elapsed_s=65, note="chunk 1 / 5")
+    return progress
+
+
+def test_control_panel_states(qapp) -> None:
+    """Вся строка состояния собрана на самой полосе: так её видит Павел в макете."""
+    panel = ControlPanel()
+    panel.set_running(10)
+    panel.update_progress(running_progress(), elapsed_s=65, note="chunk 1 / 5")
     assert panel.frames_bar.value() == 2 and panel.samples_bar.maximum() == 16
-    assert panel.status_label.text() == "Frame 2 / 10 · rendering 3 · sample 4 / 16 · chunk 1 / 5"
-    details = panel.detail_label.text()
-    assert "Elapsed 1m 05s" in details and "ETA 16 s" in details and "Peak 512 M" in details
+    assert panel.status_text() == "2 / 10 frames · 20% · frame 3 · sample 4/16 · 1m 05s · VRAM 512 M · chunk 1 / 5"
     panel.set_finished("Failed", "error", hint="Out of memory")
     assert not panel.hint_label.isHidden()
     panel.set_idle()
-    assert panel.hint_label.isHidden() and panel.chart.series() == []
+    assert panel.hint_label.isHidden() and panel.status_text() == "Waiting to start"
+
+
+def test_analytics_panel_shows_three_numbers(qapp) -> None:
+    panel = AnalyticsPanel()
+    panel.update_progress(running_progress(), elapsed_s=65)
+    assert panel.eta_stat.value_label.text() == "16 s"
+    assert panel.avg_stat.value_label.text() == "2.0 s"
+    assert panel.vram_stat.value_label.text() == "512 M"
+    assert current_points(panel.chart) == [(1, 0.7), (2, 0.6)]
+    panel.set_idle()
+    assert panel.chart.series() == [] and panel.eta_stat.value_label.text() == "—"
 
 
 def current_points(chart: FrameChart) -> list[tuple[int, float]]:
@@ -310,7 +326,7 @@ def test_render_button_requires_project(qapp, configured_store: SettingsStore, c
     window = MainWindow(configured_store, capabilities_loader=caps_loader)
     wait_until(qapp, lambda: window.capabilities is not None)
     window.start_render()
-    assert "Load a project first" in window.log_view.status_label.text() and not window.runner.is_running()
+    assert "Load a project first" in window.log_view.status_text() and not window.runner.is_running()
 
 
 def test_render_job_gets_preset_overrides(qapp, settings_path: Path, fake_blender: Path, caps_loader, project_loader, blend_file: Path, tmp_path: Path, monkeypatch) -> None:
@@ -335,7 +351,7 @@ def test_render_job_gets_preset_overrides(qapp, settings_path: Path, fake_blende
     assert job.preset == "Draft" and job.engine is None and job.file_format == "JPEG"
     assert job.overrides["eevee.taa_render_samples"] == 16 and job.overrides["render.resolution_percentage"] == 25
     assert "render.use_persistent_data" not in job.overrides and "cycles.samples" not in job.overrides
-    assert "stop here" in window.log_view.status_label.text()
+    assert "stop here" in window.log_view.status_text()
 
     # Режимы полей переживают смену пресета: «не трогать» — выбор пользователя, а не пресета.
     window.settings_form.preset_combo.setCurrentIndex(1)  # Super
@@ -365,7 +381,7 @@ def test_start_render_reports_unstartable_blender(qapp, settings_path: Path, fak
     assert window.log_view.command().startswith(f'"{fake_blender}"') and " -S Scene " in window.log_view.command()
     wait_until(qapp, lambda: window.runner.status is not None, timeout=30)
     assert window.runner.status == "failed"
-    assert "Failed" in window.log_view.status_label.text()
+    assert "Failed" in window.log_view.status_text()
     assert window.render_button.isEnabled() and not window.stop_button.isEnabled() and not window.pause_button.isEnabled()
     lines = window.log_view.lines()
     assert any("could not start" in line for line in lines) and any(line.startswith("[BRM] retry 1/1") for line in lines)
@@ -388,14 +404,14 @@ def test_pause_after_frame_and_resume(qapp, settings_path: Path, fake_blender: P
     wait_until(qapp, lambda: window.runner.status is not None, timeout=30)
     assert window.runner.status == "paused"
     assert window.pause_button.text() == "Resume" and window.pause_button.isEnabled() and window.render_button.isEnabled()
-    assert "Paused after" in window.progress_panel.status_label.text()
+    assert "Paused after" in window.control_panel.status_text()
 
     window.pause_or_resume()  # Resume
     assert not window.render_button.isEnabled()
     wait_until(qapp, lambda: window.runner.status == "success", timeout=30)
     assert window.runner.tracker.progress.frames_done == [1, 2, 3, 4]  # сквозной прогресс
-    assert "Finished" in window.progress_panel.status_label.text() and window.pause_button.text() == "Pause"
-    assert current_points(window.progress_panel.chart) == [(f, 0.1) for f in [1, 2, 3, 4]]
+    assert "Finished" in window.control_panel.status_text() and window.pause_button.text() == "Pause"
+    assert current_points(window.analytics_panel.chart) == [(f, 0.1) for f in [1, 2, 3, 4]]
     stats = json.loads(window.runner.plans[0].stats_path.read_text(encoding="utf-8"))
     assert stats["frames_done"] == [1, 2, 3, 4] and stats["status"] == "success"
     assert builder.chunk_calls[0] == [1, 2]
@@ -424,7 +440,7 @@ def test_queue_runs_items_sequentially_and_persists(qapp, settings_path: Path, f
     statuses = [item.status for item in window.queue.items]
     assert statuses == ["done", "done"]
     assert all(item.frames_done == 2 and item.frames_total == 2 for item in window.queue.items)
-    assert "Queue finished" in window.log_view.status_label.text()
+    assert "Queue finished" in window.log_view.status_text()
     assert len(builder.chunk_calls) == 2
     assert QueueStore(queue_store.path).load().items[0].status == "done"
 
@@ -455,7 +471,9 @@ def test_author_credit_is_shown(qapp, settings_path: Path) -> None:
     window = MainWindow(SettingsStore(settings_path))
     from brm import __build__
 
-    assert window.credit_label.text() == f"Made by Pavel Postnikov · Build {__build__}"
+    text = window.credit_label.text()
+    assert text.endswith(f"Made by Pavel Postnikov · Build {__build__}")
+    assert text.startswith("©")  # год слева от подписи, как в макете
 
 
 def test_settings_dialog_ok_follows_validation(qapp, fake_blender: Path) -> None:
@@ -765,7 +783,7 @@ def test_history_recording_never_crashes_the_finish_handler(
     window.start_render()
     wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
 
-    assert "Finished" in window.log_view.status_label.text()
+    assert "Finished" in window.log_view.status_text()
     assert any("SKIP history: disk on fire" in line for line in window.log_view.lines())
 
 
@@ -1218,7 +1236,7 @@ def test_saving_over_a_builtin_name_is_refused(
     )
     monkeypatch.setattr(main_window_mod.QInputDialog, "getText", staticmethod(lambda *a, **k: ("Super", True)))
     window.save_current_as_preset()
-    assert "built-in" in window.log_view.status_label.text()
+    assert "built-in" in window.log_view.status_text()
     combo = window.settings_form.preset_combo
     assert [combo.itemData(i) for i in range(combo.count())] == ["Draft", "Super", "Manual"]
 
@@ -1247,7 +1265,15 @@ def test_main_screen_keeps_only_what_is_used(
     assert _on_main_screen(window, window.project_panel)
     assert _on_main_screen(window, window.settings_form)
     assert _on_main_screen(window, window.log_view)
-    for widget in (window.queue_view, window.video_panel, window.settings_form.expert_form):
+    hidden = (
+        window.queue_view,
+        window.video_panel,
+        window.settings_form.expert_form,
+        # Патч 3012: подробные настройки и полный лог тоже уехали в свои окна.
+        window.settings_form.details_widget,
+        window.log_view.view,
+    )
+    for widget in hidden:
         assert not _on_main_screen(window, widget)
     # Строки Camera и Safety с панели проекта тоже ушли.
     assert window.project_panel.camera_label.isHidden()
@@ -1280,6 +1306,16 @@ def test_hidden_panels_open_in_their_own_windows(
     window.show_safety()
     assert window._safety_dialog is not None
     assert window._safety_dialog.content is window.project_panel.safety_widget
+
+    # Подробные настройки и полный лог — те же виджеты, только в рамке окна.
+    window.show_details()
+    assert window._details_window is not None and not window._details_window.isHidden()
+    assert window._details_window.content is window.settings_form.details_widget
+    assert window.settings_form.rows["samples"].isVisible()
+
+    window.show_full_log()
+    assert window._log_window is not None and not window._log_window.isHidden()
+    assert window._log_window.view is window.log_view.view
     # Виджеты те же самые, значит состояние читается там же, где и раньше.
     window.project_panel.resume_check.setChecked(False)
     job = window.compose_job()
@@ -1313,7 +1349,7 @@ def test_build_number_is_next_to_the_author(qapp, settings_path: Path) -> None:
     from brm import __build__
 
     window = MainWindow(SettingsStore(settings_path))
-    assert window.credit_label.text() == f"Made by Pavel Postnikov · Build {__build__}"
+    assert window.credit_label.text().endswith(f"Made by Pavel Postnikov · Build {__build__}")
 
 
 # --- график истории кадров ---------------------------------------------------------
@@ -1426,10 +1462,10 @@ def test_clearing_the_whole_history(
 
     view = window._history_dialog.view
     assert view.table.rowCount() == 0 and view.chart.series() == []
-    assert "History cleared, 2 render(s) removed" in window.log_view.status_label.text()
+    assert "History cleared, 2 render(s) removed" in window.log_view.status_text()
     # На живом графике красные линии исчезли, синяя от прошедшего прогона осталась:
     # это результат текущей сессии, а не запись истории.
-    assert [s.role for s in window.progress_panel.chart.series()] == ["current"]
+    assert [s.role for s in window.analytics_panel.chart.series()] == ["current"]
 
 
 def test_live_chart_draws_earlier_runs_under_the_current_one(
@@ -1455,9 +1491,9 @@ def test_live_chart_draws_earlier_runs_under_the_current_one(
     window.start_render()  # второй рисуется поверх него
     wait_until(qapp, lambda: window.runner.status is not None, timeout=20)
 
-    roles = [s.role for s in window.progress_panel.chart.series()]
+    roles = [s.role for s in window.analytics_panel.chart.series()]
     assert roles.count(ROLE_CURRENT) == 1 and ROLE_RECENT in roles
-    assert current_points(window.progress_panel.chart) == [(f, 0.1) for f in (1, 2, 3)]
+    assert current_points(window.analytics_panel.chart) == [(f, 0.1) for f in (1, 2, 3)]
 
 
 # --- устройство, отсечение по камере и анализ сцены --------------------------------
