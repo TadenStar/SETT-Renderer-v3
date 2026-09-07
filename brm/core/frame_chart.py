@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 # Сколько прошлых рендеров показывать. Пять — из отзыва: больше линий
@@ -146,3 +147,41 @@ def series_summary(series: list[ChartSeries]) -> str:
     if recent:
         parts.append(f"{len(recent)} earlier render{'s' if len(recent) > 1 else ''}")
     return " · ".join(parts)
+
+
+def nice_step(span: float, target: int) -> float:
+    """Шаг делений оси: 1, 2 или 5 на порядок — числа, которые читаются с ходу.
+
+    ``target`` — сколько делений хочется получить; шаг округляется вверх, поэтому
+    делений выходит не больше запрошенного. Мусор на входе даёт 1.0, а не падение.
+    """
+    if target <= 0 or not math.isfinite(span) or span <= 0:
+        return 1.0
+    raw = span / target
+    power = 10.0 ** math.floor(math.log10(raw))
+    for multiple in (1.0, 2.0, 5.0):
+        if raw <= multiple * power:
+            return multiple * power
+    return 10.0 * power
+
+
+def value_ticks(high: float, target: int = 5) -> list[float]:
+    """Деления оси времени от нуля до потолка. Последнее деление не ниже ``high``.
+
+    Верхнее деление и есть потолок графика: линия упирается в подписанное число,
+    а не в произвольный запас над пиком.
+    """
+    if not math.isfinite(high) or high <= 0:
+        return [0.0]
+    step = nice_step(high, target)
+    count = max(int(math.ceil(high / step - 1e-9)), 1)
+    return [round(step * index, 10) for index in range(count + 1)]
+
+
+def frame_ticks(frame_min: int, frame_max: int, target: int = 5) -> list[int]:
+    """Подписи оси кадров. Концы обязательны: по ним видно, какой кусок показан."""
+    if frame_max <= frame_min:
+        return [frame_min]
+    span = frame_max - frame_min
+    steps = max(min(target, span), 1)
+    return sorted({frame_min + round(span * index / steps) for index in range(steps + 1)})

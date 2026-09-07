@@ -12,7 +12,10 @@ from brm.core.frame_chart import (
     ChartSeries,
     build_series,
     chart_bounds,
+    frame_ticks,
+    nice_step,
     series_summary,
+    value_ticks,
 )
 
 CURRENT = [(1, 2.0), (2, 3.0), (3, 2.5)]
@@ -114,3 +117,41 @@ def test_series_peak_and_frames_handle_a_single_point() -> None:
     one = ChartSeries("x", ((7, 1.5),), ROLE_CURRENT)
     assert one.peak == 1.5 and one.frames == (7, 7)
     assert ChartSeries("empty", (), ROLE_RECENT).frames is None
+
+
+# --- деления осей ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("span", "target", "expected"),
+    [(100, 5, 20.0), (21, 5, 5.0), (1.0, 4, 0.5), (7, 5, 2.0), (0, 5, 1.0), (-3, 5, 1.0), (10, 0, 1.0)],
+)
+def test_nice_step_rounds_to_one_two_or_five(span: float, target: int, expected: float) -> None:
+    assert nice_step(span, target) == pytest.approx(expected)
+
+
+def test_value_ticks_start_at_zero_and_cover_the_peak() -> None:
+    """Верхнее деление — потолок графика: линия упирается в подписанное число."""
+    ticks = value_ticks(21.0)
+    assert ticks[0] == 0.0 and ticks[-1] >= 21.0
+    assert ticks == [0.0, 5.0, 10.0, 15.0, 20.0, 25.0]
+
+
+def test_value_ticks_survive_nothing_to_draw() -> None:
+    assert value_ticks(0.0) == [0.0] and value_ticks(-1.0) == [0.0]
+
+
+def test_value_ticks_work_on_fast_frames() -> None:
+    """Кадр по 0.8 с — обычное дело с DLSS; ось не должна схлопываться в ноль."""
+    ticks = value_ticks(0.86)
+    assert ticks[-1] >= 0.86 and len(ticks) > 1
+
+
+def test_frame_ticks_keep_both_ends() -> None:
+    ticks = frame_ticks(1, 1441)
+    assert ticks[0] == 1 and ticks[-1] == 1441 and len(ticks) == 6
+
+
+def test_frame_ticks_do_not_repeat_on_short_ranges() -> None:
+    assert frame_ticks(5, 5) == [5]
+    assert frame_ticks(1, 3) == [1, 2, 3]

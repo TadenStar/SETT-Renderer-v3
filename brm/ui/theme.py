@@ -23,6 +23,8 @@ DARK = {
     "chart_recent": "#D9524F",
     "chart_reference": "#E3B341",
     "chart_axis": "#3A3A3A",
+    "chart_grid": "#2C2C2C",
+    "chart_text": "#8C8C8C",
     "window": "#1B1B1B",
     "card": "#242424",
     "card_border": "#2E2E2E",
@@ -41,6 +43,13 @@ DARK = {
     "primary_text": "#0F1F17",
     "primary_disabled": "#245C42",
     "primary_disabled_text": "#6E8F80",
+    "warn_button": "#C08A2E",
+    "warn_button_hover": "#D29A38",
+    "warn_button_text": "#1F1608",
+    "warn_button_disabled": "#4A3A20",
+    "warn_button_disabled_text": "#8A7A60",
+    "progress_track": "#1F1F1F",
+    "card_title": "#E6E6E6",
     "danger": "#C9403D",
     "danger_hover": "#D94F4C",
     "danger_text": "#FFFFFF",
@@ -62,6 +71,8 @@ LIGHT = {
     "chart_recent": "#B03A37",
     "chart_reference": "#B8860B",
     "chart_axis": "#C9C9C9",
+    "chart_grid": "#E4E4E4",
+    "chart_text": "#707070",
     "window": "#F2F2F2",
     "card": "#FFFFFF",
     "card_border": "#E0E0E0",
@@ -80,6 +91,13 @@ LIGHT = {
     "primary_text": "#FFFFFF",
     "primary_disabled": "#BFE6D2",
     "primary_disabled_text": "#7FA892",
+    "warn_button": "#E0A22B",
+    "warn_button_hover": "#CC9224",
+    "warn_button_text": "#2A1F06",
+    "warn_button_disabled": "#F2E2BE",
+    "warn_button_disabled_text": "#A89468",
+    "progress_track": "#E8E8E8",
+    "card_title": "#1E1E1E",
     "danger": "#D9413F",
     "danger_hover": "#C43533",
     "danger_text": "#FFFFFF",
@@ -100,16 +118,17 @@ QMainWindow, QDialog { background: $window; }
 QGroupBox {
     background: $card;
     border: 1px solid $card_border;
-    border-radius: 8px;
-    margin-top: 20px;
-    padding: 10px 12px 12px 12px;
+    border-radius: 10px;
+    margin-top: 0;
+    padding: 32px 14px 14px 14px;
 }
 QGroupBox::title {
-    subcontrol-origin: margin;
+    subcontrol-origin: border;
     subcontrol-position: top left;
-    left: 12px;
-    top: 2px;
-    color: $muted;
+    left: 14px;
+    top: 10px;
+    color: $card_title;
+    font-size: 11pt;
     font-weight: 600;
 }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit {
@@ -157,7 +176,28 @@ QPushButton#dangerButton {
 }
 QPushButton#dangerButton:hover { background: $danger_hover; }
 QPushButton#dangerButton:disabled { background: $danger_disabled; color: $danger_disabled_text; }
-QPlainTextEdit#logText { font-family: $mono_font; font-size: 9pt; }
+QPushButton#warnButton {
+    background: $warn_button;
+    color: $warn_button_text;
+    border: none;
+    font-weight: 600;
+    padding: 8px 22px;
+}
+QPushButton#warnButton:hover { background: $warn_button_hover; }
+QPushButton#warnButton:disabled { background: $warn_button_disabled; color: $warn_button_disabled_text; }
+QPushButton#wideButton { padding: 9px 14px; text-align: center; }
+QProgressBar {
+    background: $progress_track;
+    border: none;
+    border-radius: 6px;
+    min-height: 22px;
+    text-align: center;
+    color: $text;
+}
+QProgressBar::chunk { background: $accent; border-radius: 6px; }
+QProgressBar#thinBar { min-height: 8px; max-height: 8px; border-radius: 4px; }
+QProgressBar#thinBar::chunk { border-radius: 4px; }
+QPlainTextEdit#logText, QLabel#logText { font-family: $mono_font; font-size: 9pt; }
 QLineEdit#commandLine { font-family: $mono_font; }
 QLabel[role="muted"] { color: $muted; }
 QLabel[role="warning"] { color: $warning; }
